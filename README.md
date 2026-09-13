@@ -194,3 +194,70 @@ floating datetimes, deadlines, and recurring metadata are covered by fixtures.
 10 reader, and 5 importer tests. All passed. Tests include provider-aware
 identity, context resolution, child-before-parent ordering, optional values,
 status/priority mapping, provenance, source immutability and determinism.
+
+## Durable completion history
+
+The separate `history.py` path reads completed tasks and appends immutable
+`TaskCompletionEvent` evidence to
+`~/ghost/state/external/todoist-history.sqlite3`. It neither reads nor publishes
+active snapshots, and does not write to Todoist. Todoist remains authoritative
+for current state; historical evidence does not imply a task is still completed.
+
+With `TODOIST_API_TOKEN` exported, run from `~/ghost`:
+
+```sh
+python3 -m integrations.todoist.history \
+  --since 2026-09-01T00:00:00Z --until 2026-09-13T00:00:00Z
+```
+
+`--since` is required and inclusive; `--until` is exclusive and defaults to now.
+Both require timezone-aware ISO datetimes. `--database` overrides the separate
+history file, and `--page-size` accepts 1–200. Rerun overlapping ranges to capture
+late-arriving evidence. There is no automatic scheduling or persistent high-water
+mark; callers choose coverage explicitly. Long ranges are split into contiguous
+30-day windows, following every cursor in each window. All retrieval and
+validation finishes before a single SQLite transaction appends the batch.
+Network, pagination, or normalization failures publish no events; failed inserts
+roll back the batch. SQLite serializes concurrent writers (30-second timeout).
+Requests use GET, refuse redirects, time out after 30 seconds, and do not retry.
+Errors omit credentials and response bodies.
+
+The provider-independent model/store lives in `completion_events.py` within this
+integration's Git repository and reuses `integrations.task_state.SourceIdentity`.
+It has no dependency on the Todoist API or active snapshot modules. Events carry
+provider-aware task/project/section/parent identities, UTC `completed_at`, title,
+source, and deeply immutable original `raw` data. Missing optional hierarchy IDs
+remain `None`; historical references need not exist in the active snapshot.
+Invalid IDs, missing completion timestamps, naive timestamps, and malformed
+content are rejected. Completion is established by the completion endpoint and
+its timestamp, not by `checked` or disappearance from a snapshot.
+
+The durable key is `(source, task_id, completed_at)` with timestamps canonicalized
+to UTC. Replay is idempotent; a later completion of the same task is a separate
+event. For duplicate keys the first stored title, context, and raw evidence win.
+The storage API never updates or deletes events. Reopening, deleting, or removing
+a task from a later snapshot does not remove its evidence. This key cannot
+distinguish two completions of one task at the exact same provider timestamp.
+One Todoist account per database is assumed, matching the existing identity model.
+
+Offline consumer example, from `~/ghost`:
+
+```python
+from integrations.todoist.history import DEFAULT_HISTORY
+from integrations.todoist.completion_events import load_events
+
+for event in load_events(DEFAULT_HISTORY):
+    print(event.task_id, event.completed_at, event.title)
+```
+
+`load_events` opens the database read-only and returns an immutable tuple ordered
+by completion time, source, and task ID; a missing database raises a SQLite error
+without creating a file. Retain/back up the database to retain history. This path
+can only preserve evidence returned by Todoist: it cannot reconstruct completions
+already unavailable remotely or guarantee every recurring occurrence is returned.
+
+Endpoint and response contract: [Todoist completion API](https://developer.todoist.com/api/v1/#tag/Tasks).
+The endpoint returns `items` and `next_cursor`, with completion-date ranges of up
+to three months. No live account import is part of the automated validation.
+Run `python3 -m unittest -v` from this directory to test both pipelines, including
+history persistence after a task disappears from a subsequently published snapshot.
