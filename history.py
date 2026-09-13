@@ -13,10 +13,11 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..task_state import SourceIdentity
+from .paths import TODOIST_HISTORY_DB_PATH
 from .completion_events import TaskCompletionEvent, append_events, load_events
 
 API = 'https://api.todoist.com/api/v1/tasks/completed/by_completion_date'
-DEFAULT_HISTORY = Path.home() / 'ghost/state/external/todoist-history.sqlite3'
+DEFAULT_HISTORY = TODOIST_HISTORY_DB_PATH
 WINDOW = timedelta(days=30)  # Safely below the API's three-month range maximum.
 
 

@@ -14,8 +14,13 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
 
+if __package__:
+    from .paths import TODOIST_EXTERNAL_STATE_ROOT
+else:
+    from paths import TODOIST_EXTERNAL_STATE_ROOT
+
 API = "https://api.todoist.com/api/v1"
-DEFAULT_OUTPUT = Path.home() / "ghost/state/external/todoist"
+DEFAULT_OUTPUT = TODOIST_EXTERNAL_STATE_ROOT
 RESOURCES = ("tasks", "projects", "sections")
 
 

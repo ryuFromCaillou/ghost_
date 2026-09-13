@@ -18,7 +18,7 @@ response bodies or credentials. Requests time out after 30 seconds; redirects
 are refused. There are no automatic retries; rerun after transient failures.
 Use `--page-size 10` to exercise pagination against a small account.
 
-Output: `~/ghost/state/external/todoist/{tasks,projects,sections,sync_metadata}.json`.
+Output: `~/ghost/integrations/state/external/todoist/{tasks,projects,sections,sync_metadata}.json`.
 The three resource files are arrays of unchanged API objects, including all
 returned fields and hierarchy IDs. Metadata includes UTC time, counts and page
 counts. JSON uses UTF-8, two-space indentation and sorted object keys.
@@ -28,7 +28,7 @@ snapshot directory beside the output, then atomically replaces the `todoist`
 symlink. Writers are serialized with a filesystem lock. Failed retrieval or
 staging leaves the previous snapshot intact. Existing real output directories
 are refused rather than overwritten. Successful older generations are retained
-in `~/ghost/state/external/.todoist-snapshots/`; retention cleanup is manual.
+in `~/ghost/integrations/state/external/.todoist-snapshots/`; retention cleanup is manual.
 A killed process may leave an unpublished generation; it does not become current.
 
 For a consistent multi-file read, ARK should resolve the `todoist` symlink once
@@ -51,6 +51,41 @@ python3 -m unittest -v
 ```
 
 API reference: https://developer.todoist.com/api/v1/
+
+## Shared state paths
+
+`~/ghost/integrations/state/` holds shared durable orchestration state;
+`~/ghost/integrations/todoist/` holds the Todoist adapter/integration code.
+Todoist does not own `goals.json`. Future integrations may consume or contribute
+to shared state, and `integrations/` may later become the orchestration/API layer.
+This is the current intent, not a finalized architecture.
+
+```text
+~/ghost/integrations/
+├── state/
+│   ├── goals.json
+│   ├── todoist-history.sqlite3
+│   └── external/
+│       ├── .todoist.lock
+│       ├── .todoist-snapshots/       # retained generations
+│       └── todoist/                 # symlink to a published generation
+│           ├── tasks.json
+│           ├── projects.json
+│           ├── sections.json
+│           └── sync_metadata.json
+└── todoist/                         # adapter code, including paths.py
+```
+
+The pure `paths.py` module centralizes defaults, using the user's home directory
+at import time. Importing it creates no directories or files. Goal persistence
+uses `goal_store.DEFAULT_PATH`; snapshot publishing and reading share
+`DEFAULT_OUTPUT`; completion ingestion uses `history.DEFAULT_HISTORY`.
+Explicit Python path arguments and history's `--database` override still apply.
+From the adapter directory, `python3 -m goal_store` inspects the default registry.
+
+These defaults replace the former `~/ghost/state/` locations. Existing state is
+left untouched: there is no migration, copying, deletion, compatibility symlink,
+or fallback read from the old locations. No database contents or schema change.
 
 ## Snapshot reader
 
@@ -190,8 +225,8 @@ same provider are not introduced in this phase.
 Validation on the current local generation: 23 tasks, 2 projects, 5 sections,
 4 resolvable children. No current tasks have due dates, so date-only, fixed and
 floating datetimes, deadlines, and recurring metadata are covered by fixtures.
-`python3 -m unittest -v` from this directory runs 27 tests: 12 normalization,
-10 reader, and 5 importer tests. All passed. Tests include provider-aware
+`python3 -m unittest -v` from this directory includes normalization,
+reader, and importer tests. Tests include provider-aware
 identity, context resolution, child-before-parent ordering, optional values,
 status/priority mapping, provenance, source immutability and determinism.
 
@@ -199,7 +234,7 @@ status/priority mapping, provenance, source immutability and determinism.
 
 The separate `history.py` path reads completed tasks and appends immutable
 `TaskCompletionEvent` evidence to
-`~/ghost/state/external/todoist-history.sqlite3`. It neither reads nor publishes
+`~/ghost/integrations/state/todoist-history.sqlite3`. It neither reads nor publishes
 active snapshots, and does not write to Todoist. Todoist remains authoritative
 for current state; historical evidence does not imply a task is still completed.
 
@@ -261,3 +296,49 @@ The endpoint returns `items` and `next_cursor`, with completion-date ranges of u
 to three months. No live account import is part of the automated validation.
 Run `python3 -m unittest -v` from this directory to test both pipelines, including
 history persistence after a task disappears from a subsequently published snapshot.
+
+## Read-only progress projection
+
+```text
+Todoist current snapshot (normalized GhostTaskState)
+        +
+completion history (TaskCompletionEvent occurrences)
+        +
+GoalRegistry
+        ↓
+ProgressProjection
+```
+
+Current state answers **“what is true now?”** Completion history answers
+**“what happened?”** GoalRegistry answers **“what does this task mean?”**
+`progress.py` combines those without changing any source. Callers supply all
+three already-loaded inputs; the projection performs no filesystem, SQLite, or
+network access and generates no timestamps.
+
+From `~/ghost`, import `project_progress` or `project_milestone_progress` from
+`integrations.todoist.progress`. The latter also takes a `milestone_id` and raises
+`ProjectionError` for an unknown milestone. Both use the existing `GhostTaskState`
+and `TaskCompletionEvent` models. Duplicate current identities or unsupported
+current statuses raise `ProjectionError` rather than silently choosing a value.
+
+Frozen `MilestoneProgress` and `GoalProgress` objects expose linked, active,
+currently completed, and missing task-ID tuples, plus `completion_event_count`
+and `last_completed_at` (None without matching evidence). Task-ID tuples contain
+`SourceIdentity(source, source_id)` objects, rather than bare strings, to preserve
+provider identity even when two providers use the same local ID. Missing means
+only absent from the supplied current task state; it implies no deletion,
+completion, invalidity, or access restriction.
+
+Only current `GhostTask.status` determines active/completed classification.
+A reopened active task can have completion evidence while its currently completed
+classification remains empty. Every supplied matching event counts, including
+recurring/recompleted occurrences; the projection does not deduplicate input
+events. The latest matching completion timestamp is compared as an aware datetime.
+The event model already canonicalizes timestamps to UTC.
+
+`ProgressProjection.milestones` and `.goals` preserve registry order. Milestone
+tasks preserve task-link order; goal tasks aggregate in milestone order and then
+link order, without duplicate provider identities. Goal event counts sum milestone
+counts and the latest timestamp spans all its milestones. Empty milestones and
+goals remain in the output. No percentages, milestone status, automatic completion,
+scheduling, or write-back are inferred.

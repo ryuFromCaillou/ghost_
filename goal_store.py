@@ -7,11 +7,13 @@ import sys
 import tempfile
 
 if __package__:
+    from .paths import GOAL_REGISTRY_PATH
     from .goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
 else:
+    from paths import GOAL_REGISTRY_PATH
     from goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
 
-DEFAULT_PATH = Path.home() / 'ghost/state/goals.json'
+DEFAULT_PATH = GOAL_REGISTRY_PATH
 _MODELS = {'goals': Goal, 'milestones': Milestone, 'task_links': TaskMilestoneLink}
 
 

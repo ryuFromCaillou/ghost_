@@ -164,7 +164,7 @@ class GoalStoreTests(unittest.TestCase):
             self.assertIs(getattr(self.registry, name), original)
 
     def test_cli_counts_only(self):
-        default = Path(self.directory.name) / 'ghost/state/goals.json'
+        default = Path(self.directory.name) / 'ghost/integrations/state/goals.json'
         save_goal_registry(self.registry, default)
         result = subprocess.run([sys.executable, '-m', 'goal_store'],
                                 cwd=Path(__file__).parent,
@@ -175,7 +175,7 @@ class GoalStoreTests(unittest.TestCase):
         self.assertEqual(result.stderr, '')
 
     def test_cli_error_hides_content(self):
-        default = Path(self.directory.name) / 'ghost/state/goals.json'
+        default = Path(self.directory.name) / 'ghost/integrations/state/goals.json'
         default.parent.mkdir(parents=True)
         self.payload['milestones'][0]['goal_id'] = 'private reference'
         default.write_text(json.dumps(self.payload), encoding='utf-8')

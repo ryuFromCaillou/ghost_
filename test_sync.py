@@ -63,8 +63,9 @@ class SyncTests(unittest.TestCase):
                 self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
 
     def test_missing_token(self):
-        with self.assertRaisesRegex(sync.SyncError, 'TODOIST_API_TOKEN'):
-            sync.sync('')
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(sync.SyncError, 'TODOIST_API_TOKEN'):
+                sync.sync('', Path(directory) / 'todoist')
 
     def test_malformed_pages_and_cursor_loops(self):
         for payloads in ([{}], [{'results': [], 'next_cursor': 5}],
