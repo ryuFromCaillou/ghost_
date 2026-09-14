@@ -54,7 +54,12 @@ def _index(records, field, expected):
     return indexed
 
 
-def _validate(registry, projection):
+def validate_projection(registry: GoalRegistry, projection: ProgressProjection):
+    """Validate correspondence without selecting; return milestones grouped by goal.
+
+    Group and member order follows the registry. Presentation layers can reuse
+    this check without rerunning the decision layer.
+    """
     goals = _index(projection.goals, 'goal_id', {g.id for g in registry.goals})
     milestones = _index(projection.milestones, 'milestone_id',
                         {m.id for m in registry.milestones})
@@ -97,7 +102,7 @@ History counts/timestamps never affect selection. Validate identities, statuses,
 links, and current classifications, trusting the caller's historical evidence.
 No projection rebuilding, source access, or semantic state changes occur here.
 """
-    children = _validate(registry, projection)
+    children = validate_projection(registry, projection)
     milestone_models = {m.id: m for m in registry.milestones}
     considered, excluded = [], []
     objective = None

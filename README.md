@@ -451,3 +451,79 @@ partition linked identities. Projection record order itself does not set priorit
 registry order does. Historical counts/timestamps are trusted and ignored by the
 selector. A stale status projection must be rebuilt by the caller, not repaired
 by the selector. The existing domain models require no changes.
+
+## Operator brief
+
+ObjectiveSelector decides what should move next. GhostBrief presents that decision
+to the operator. GhostBrief does not make strategic decisions. It renders decisions
+already made by the objective layer and exposes nearby blocked/queued work.
+
+```text
+GoalRegistry + GhostTaskState + CompletionHistory
+                      ↓
+              ProgressProjection
+                      ↓
+              ObjectiveSelection
+                      ↓
+                 GhostBrief
+                      ↓
+                  Operator
+```
+
+The operator can later be a human or execution agent. The separation remains:
+state != interpretation, interpretation != decision, decision != presentation,
+and presentation != execution. GhostBrief never alters what ObjectiveSelector
+decided.
+
+The pure API in `integrations.todoist.brief` accepts all layers explicitly:
+
+```python
+from integrations.todoist.brief import build_brief, render_brief
+
+brief = build_brief(registry, task_state, projection, selection)
+text = render_brief(brief)
+```
+
+`build_brief` performs no loading, projection rebuilding, or objective selection.
+It resolves goal/milestone titles from GoalRegistry and task content from normalized
+`GhostTask.title`, never raw Todoist data. It preserves the supplied objective's
+summary and task order. Frozen models are `BriefTask`, `BriefObjective`,
+`BriefBlockedItem`, `BriefQueuedItem`, and `GhostBrief`; collections are tuples and
+task identities remain provider-aware. Blocked/queued records include `goal_title`
+so the renderer needs only the brief, with no source lookups.
+
+PRIMARY presents the supplied objective. BLOCKED includes only BLOCKED milestones
+under ACTIVE goals. QUEUED includes other ACTIVE milestones under ACTIVE goals
+with current active linked tasks. Both sections follow goal registry order, then
+milestone registry order within each goal. Planned and complete milestones, and
+all work under non-ACTIVE goals, are omitted. Completed, missing, or historical-only
+tasks never make work actionable.
+
+An absent objective stays absent, even if the caller supplies actionable work:
+it is shown as queued, never promoted by the brief. The builder checks the decision's
+identity and active task set, not its priority or diagnostic reason codes. Selection
+remains the caller-supplied decision. Message codes are emitted in this order:
+`primary_objective_selected` or `no_primary_objective`, then `blocked_work_present`
+and `queued_work_present` when applicable. `no_actionable_work` is emitted only
+when primary, blocked, and queued are all empty.
+
+Invalid correspondence raises `BriefError`: unknown/duplicate/missing projection
+identities, registry status/parent/link disagreements, inconsistent classification
+or goal aggregation, duplicate current task identities, stale current task
+classifications, unknown objective goals/milestones, wrong parent goal, inactive
+semantic status, or an objective task set that differs from its active linked
+projection set. Every selected task must resolve to one ACTIVE normalized task.
+The selector's existing validation is exposed as `validate_projection` and reused
+without running selection. No source is repaired or mutated.
+
+`render_brief` emits plain text with `GHOST BRIEF`, PRIMARY, and, when a primary
+exists, TASKS. Nonempty BLOCKED and QUEUED sections follow. Empty PRIMARY prints
+`None`; a completely empty brief adds `No actionable work.`. Output uses blank
+lines between sections and one final newline. IDs, reason/message codes, timestamps,
+completion counts, and diagnostic metadata are not printed. Titles, task content,
+and the supplied summary are rendered directly without generated prose.
+
+No CLI is added in this phase. The core is ready for a later `ghost brief` adapter;
+that adapter must own durable loading and the policy for unavailable snapshots,
+registries, or history. The brief itself introduces no loading or fallback policy.
+There is no scheduling, execution, notification, persistence, or provider write-back.
