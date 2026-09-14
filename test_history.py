@@ -90,6 +90,40 @@ class HistoryTests(unittest.TestCase):
             ingest_history('secret', START, END, self.path, opener=api)
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_terminal_pages_with_null_or_omitted_cursor(self):
+        for payload in [page(row()), {'items': [row()]}, page(), {'items': []}]:
+            with self.subTest(payload=payload):
+                api = API(payload)
+                events = fetch_completions('secret', START, END, opener=api)
+                self.assertEqual(events, tuple(normalize_completion(value)
+                                               for value in payload['items']))
+                self.assertEqual(len(api.requests), 1)
+
+    def test_valid_cursor_pagination(self):
+        first, second = row(), row('2026-01-01T13:00:00Z')
+        api = API(page(first, cursor='a+b/='), {'items': [second]})
+        events = fetch_completions('secret', START, END, opener=api)
+        self.assertEqual(events, (normalize_completion(first), normalize_completion(second)))
+        self.assertEqual(len(api.requests), 2)
+        queries = [parse_qs(urlparse(request.full_url).query) for request in api.requests]
+        self.assertNotIn('cursor', queries[0])
+        self.assertEqual(queries[1]['cursor'], ['a+b/='])
+
+    def test_invalid_cursors(self):
+        for cursor in [42, False, [], {}, '']:
+            with self.subTest(cursor=cursor), self.assertRaisesRegex(HistoryError, 'cursor'):
+                ingest_history('secret', START, END, self.path, opener=API(page(cursor=cursor)))
+            self.assertFalse(self.path.exists())
+
+    def test_missing_or_invalid_items(self):
+        for items in [{}, {'items': None}, {'items': {}}, {'items': ''}, {'items': 42}]:
+            for cursor in [{}, {'next_cursor': None}]:
+                payload = dict(items, **cursor)
+                with self.subTest(payload=payload), self.assertRaisesRegex(
+                        HistoryError, 'Invalid completion page'):
+                    ingest_history('secret', START, END, self.path, opener=API(payload))
+                self.assertFalse(self.path.exists())
+
     def test_malformed_pages_and_records_publish_nothing(self):
         invalid_rows = [dict(row(), id=None), dict(row(), id=12),
                         dict(row(), completed_at=None), dict(row(), completed_at='2026-01-01'),
@@ -97,7 +131,7 @@ class HistoryTests(unittest.TestCase):
                         dict(row(), content=None), dict(row(), section_id=''),
                         dict(row(), completed_at='2026-01-02T12:00:00Z')]
         payloads = [page(value) for value in invalid_rows]
-        payloads += [{'results': [], 'next_cursor': None}, {'items': []}, page(cursor=42)]
+        payloads += [{'results': [], 'next_cursor': None}, page(cursor=42)]
         for payload in payloads:
             with self.subTest(payload=payload), self.assertRaises(HistoryError):
                 ingest_history('secret', START, END, self.path, opener=API(payload))

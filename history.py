@@ -98,15 +98,14 @@ def fetch_completions(token, since, until, page_size=200, opener=None):
                 raise HistoryError('Completion API: network failure') from None
             except (ValueError, UnicodeError, RecursionError):
                 raise HistoryError('Completion API: invalid JSON') from None
-            if (not isinstance(payload, dict) or not isinstance(payload.get('items'), list)
-                    or 'next_cursor' not in payload):
+            if not isinstance(payload, dict) or not isinstance(payload.get('items'), list):
                 raise HistoryError('Invalid completion page')
             for row in payload['items']:
                 event = normalize_completion(row)
                 if not since <= event.completed_at < end:
                     raise HistoryError('Completion timestamp outside requested window')
                 events.append(event)
-            cursor = payload['next_cursor']
+            cursor = payload.get('next_cursor')
             if cursor is None:
                 break
             if not isinstance(cursor, str) or not cursor or cursor in cursors:
