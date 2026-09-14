@@ -390,4 +390,64 @@ explicit registry status without reconciliation. A COMPLETE milestone with activ
 tasks is valid. All completed tasks do not complete a milestone, and all COMPLETE
 milestones do not complete their goal. Direct construction of these projection
 records now requires a `status` argument; projection function signatures are
-unchanged. No automatic transitions or objective selection are implemented.
+unchanged. No automatic transitions are implemented. Objective selection is described below.
+
+
+## Objective selection
+
+ProgressProjection answers: **“Where is there evidence of progress?”**
+Explicit status answers: **“What semantic state has ARK/GHOST asserted?”**
+Objective selection answers: **“Which active milestone should move next?”**
+
+```text
+GoalRegistry + ProgressProjection
+                ↓
+         ObjectiveSelector
+                ↓
+         ObjectiveSelection
+```
+
+Call `select_objective(registry, projection)` from
+`integrations.todoist.objective` with already-loaded models. It does not rebuild
+progress, read sources, generate timestamps, change statuses, or save anything.
+This is not yet scheduling or autonomous execution.
+
+Only ACTIVE goals and ACTIVE milestones with at least one currently active linked
+task are actionable. PLANNED, BLOCKED, and COMPLETE remain excluded even when
+active task evidence exists. Completed, missing, or historical-only tasks are
+never actionable. Completion history does not reopen semantic state.
+
+Registry order is explicit priority order: traverse `GoalRegistry.goals`, then
+for each goal traverse its milestones in `GoalRegistry.milestones` order. The
+first eligible milestone wins. This goal-first order takes precedence over global
+milestone order across different goals. Titles, completion counts, and last
+completion timestamps have no ranking effect.
+
+Frozen `Objective` contains `goal_id`, `milestone_id`, `task_ids` (a tuple of
+`SourceIdentity` values), `reason_codes`, and `summary`. All active linked tasks
+in the chosen milestone are included in task-link order. The deterministic
+summary is `Advance milestone: {milestone.title}`. Selected reason codes are
+`goal_active`, `milestone_active`, `actionable_tasks_present`, and
+`highest_registry_priority`.
+
+Frozen `ObjectiveSelection` contains `objective` (None if no work is eligible),
+`considered_milestone_ids`, and an `excluded` tuple of frozen `ObjectiveExclusion`
+records (`milestone_id`, `reason_code`). All milestones are considered in priority
+order, including those after the winner. Only ineligible milestones are excluded;
+lower-priority eligible work remains eligible. Each exclusion has one reason,
+with parent-goal ineligibility taking precedence:
+
+- `goal_not_active`: parent goal is PLANNED, BLOCKED, or COMPLETE.
+- `milestone_blocked`: milestone is BLOCKED under an ACTIVE goal.
+- `milestone_complete`: milestone is COMPLETE under an ACTIVE goal.
+- `milestone_not_active`: milestone is PLANNED under an ACTIVE goal.
+- `no_actionable_tasks`: both are ACTIVE but no active current linked task exists.
+
+Before selecting, the complete projection is checked against the registry.
+Unknown, duplicate, or missing goal/milestone projections, parent/status mismatch,
+link/order mismatch, inconsistent current classifications, and inconsistent goal
+task aggregation raise `ObjectiveSelectionError`. Current classifications must
+partition linked identities. Projection record order itself does not set priority;
+registry order does. Historical counts/timestamps are trusted and ignored by the
+selector. A stale status projection must be rebuilt by the caller, not repaired
+by the selector. The existing domain models require no changes.
