@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, fields, replace
 import unittest
 
-from goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
+from goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink, with_goal_status, with_milestone_status
 
 
 class GoalTests(unittest.TestCase):
@@ -11,6 +11,63 @@ class GoalTests(unittest.TestCase):
         self.second = Milestone('m2', 'g', 'Practice')
         self.link = TaskMilestoneLink('todoist', 't', 'm1')
         self.registry = GoalRegistry([self.goal], [self.first, self.second], [self.link])
+
+    def test_status_defaults_and_explicit_values(self):
+        self.assertIs(self.goal.status, Status.PLANNED)
+        self.assertIs(self.first.status, Status.PLANNED)
+        for status in Status:
+            for model in (self.goal, self.first):
+                self.assertIs(replace(model, status=status).status, status)
+
+    def test_invalid_status(self):
+        for value in ('active', 'invalid', None, 1, True, [], {}):
+            for model in (self.goal, self.first):
+                with self.subTest(value=value, model=model):
+                    with self.assertRaises(ValueError):
+                        replace(model, status=value)
+            for helper, id in ((with_goal_status, 'g'), (with_milestone_status, 'm1')):
+                with self.assertRaises(ValueError):
+                    helper(self.registry, id, value)
+
+    def test_registry_revalidates_status(self):
+        for model, field in ((self.goal, 'goals'), (self.first, 'milestones')):
+            malformed = replace(model)
+            object.__setattr__(malformed, 'status', 'active')
+            with self.assertRaises(ValueError):
+                replace(self.registry, **{field: (malformed,)})
+
+    def test_status_replacements_preserve_inputs_and_order(self):
+        from unittest.mock import patch
+        registry = replace(self.registry, goals=(Goal('other', ''), self.goal))
+        before = repr(registry)
+        for helper, id, field in ((with_goal_status, 'g', 'goals'),
+                                  (with_milestone_status, 'm1', 'milestones')):
+            for initial in Status:
+                original = helper(registry, id, initial)
+                for status in Status:
+                    with patch('builtins.open', side_effect=AssertionError('IO')):
+                        updated = helper(original, id, status)
+                    self.assertIsNot(updated, original)
+                    self.assertEqual(tuple(x.id for x in getattr(updated, field)),
+                                     tuple(x.id for x in getattr(original, field)))
+                    self.assertEqual(updated.task_links, original.task_links)
+                    for collection in ('goals', 'milestones'):
+                        for old, new in zip(getattr(original, collection), getattr(updated, collection)):
+                            if collection == field and old.id == id:
+                                self.assertIs(new.status, status)
+                                self.assertIs(old.status, initial)
+                                self.assertEqual(new, replace(old, status=status))
+                            else:
+                                self.assertIs(new, old)
+                    if status == initial:
+                        self.assertEqual(updated, original)
+        self.assertEqual(repr(registry), before)
+
+    def test_status_replacement_unknown_ids(self):
+        for helper, message in ((with_goal_status, 'Unknown goal'),
+                                (with_milestone_status, 'Unknown milestone')):
+            with self.assertRaisesRegex(ValueError, message):
+                helper(self.registry, 'unknown', Status.ACTIVE)
 
     def test_resolution(self):
         self.assertEqual(self.registry.get_goal('g'), self.goal)

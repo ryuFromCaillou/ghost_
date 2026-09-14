@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from goal_store import GoalStoreError, load_goal_registry, save_goal_registry
-from goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
+from goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 
 
 class GoalStoreTests(unittest.TestCase):
@@ -33,6 +33,54 @@ class GoalStoreTests(unittest.TestCase):
         with self.assertRaises(GoalStoreError) as caught:
             load_goal_registry(self.path)
         self.assertIsInstance(caught.exception.__cause__, cause)
+
+    def test_legacy_status_defaults_without_rewrite(self):
+        for collection in ('goals', 'milestones'):
+            for row in self.payload[collection]:
+                row.pop('status')
+        self.write(self.payload)
+        before = self.path.read_bytes()
+        loaded = load_goal_registry(self.path)
+        self.assertTrue(all(model.status is Status.PLANNED
+                            for model in (*loaded.goals, *loaded.milestones)))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_status_round_trip_and_canonical_strings(self):
+        from dataclasses import replace
+        for status in Status:
+            registry = replace(self.registry,
+                               goals=(replace(self.registry.goals[0], status=status),),
+                               milestones=tuple(replace(m, status=status) for m in self.registry.milestones))
+            save_goal_registry(registry, self.path)
+            first = self.path.read_bytes()
+            payload = json.loads(first)
+            for collection in ('goals', 'milestones'):
+                for row in payload[collection]:
+                    self.assertEqual(row['status'], status.value)
+                    self.assertIs(type(row['status']), str)
+            self.assertNotIn('status', payload['task_links'][0])
+            loaded = load_goal_registry(self.path)
+            self.assertEqual(loaded, registry)
+            self.assertIs(loaded.goals[0].status, status)
+            self.assertIs(loaded.milestones[0].status, status)
+            save_goal_registry(loaded, self.path)
+            self.assertEqual(first, self.path.read_bytes())
+
+    def test_invalid_persisted_status(self):
+        for collection in ('goals', 'milestones'):
+            for value in ('ACTIVE', 'done', '', None, 1, True, [], {}):
+                payload = deepcopy(self.payload)
+                payload[collection][0]['status'] = value
+                with self.subTest(collection=collection, value=value):
+                    self.assert_invalid(payload)
+
+    def test_duplicate_status_key_rejected(self):
+        self.write(self.payload)
+        data = self.path.read_text().replace('"status": "planned"',
+                                            '"status": "active", "status": "complete"', 1)
+        self.path.write_text(data)
+        with self.assertRaises(GoalStoreError):
+            load_goal_registry(self.path)
 
     def test_round_trip(self):
         save_goal_registry(self.registry, self.path)

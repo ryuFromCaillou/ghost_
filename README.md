@@ -340,5 +340,54 @@ The event model already canonicalizes timestamps to UTC.
 tasks preserve task-link order; goal tasks aggregate in milestone order and then
 link order, without duplicate provider identities. Goal event counts sum milestone
 counts and the latest timestamp spans all its milestones. Empty milestones and
-goals remain in the output. No percentages, milestone status, automatic completion,
-scheduling, or write-back are inferred.
+goals remain in the output. Semantic status is copied directly from the registry. No percentages, automatic
+completion, scheduling, or write-back are inferred.
+
+
+## Explicit goal and milestone status
+
+| Dimension | Meaning |
+| --- | --- |
+| Current task state | What is true about tasks now |
+| Completion history | What task completions happened |
+| GoalRegistry | What tasks mean |
+| ProgressProjection | Evidence of progress |
+| Goal/Milestone status | What ARK/GHOST explicitly asserts is the current semantic state |
+
+Task evidence does not automatically transition semantic status.
+
+`goals.Status` is shared by frozen `Goal` and `Milestone` models:
+`PLANNED`, `ACTIVE`, `BLOCKED`, and `COMPLETE`. Both default to `Status.PLANNED`;
+Python constructors and replacement helpers require enum members, not strings.
+The new field follows `description`, preserving existing positional model calls.
+`TaskMilestoneLink` is unchanged.
+
+Persistence represents status as exactly `"planned"`, `"active"`, `"blocked"`, or
+`"complete"` in each goal and milestone JSON object. Loading converts these strings
+into enum members; absent status defaults to PLANNED for legacy files. Explicit
+nulls, unknown strings, and other malformed values are rejected and wrapped in
+`GoalStoreError`. Loading never rewrites a file. An explicit save includes status
+fields, retaining deterministic UTF-8 JSON and atomic replacement. Older versions
+of the strict loader cannot read the added fields. The existing `python3 -m
+goal_store` CLI still prints only counts.
+
+Pure helpers in `goals.py` return a new registry, preserve collection order and
+unaffected models/links, and never persist:
+
+```python
+from integrations.todoist.goals import Status, with_goal_status, with_milestone_status
+
+registry = with_goal_status(registry, "thesis", Status.ACTIVE)
+registry = with_milestone_status(registry, "experimental_validation", Status.COMPLETE)
+```
+
+Unknown IDs and invalid status values raise `ValueError`. Every valid status can
+replace every other status, including reopening COMPLETE as ACTIVE. Same-status
+replacement returns a new, equal registry. The original registry stays unchanged.
+
+`MilestoneProgress.status` and `GoalProgress.status` expose the corresponding
+explicit registry status without reconciliation. A COMPLETE milestone with active
+tasks is valid. All completed tasks do not complete a milestone, and all COMPLETE
+milestones do not complete their goal. Direct construction of these projection
+records now requires a `status` argument; projection function signatures are
+unchanged. No automatic transitions or objective selection are implemented.

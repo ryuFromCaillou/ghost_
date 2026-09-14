@@ -10,7 +10,7 @@ from datetime import datetime
 
 from ..task_state import GhostTaskState, SourceIdentity, TaskStatus
 from .completion_events import TaskCompletionEvent
-from .goals import GoalRegistry
+from .goals import GoalRegistry, Status
 
 
 class ProjectionError(ValueError):
@@ -27,6 +27,7 @@ class MilestoneProgress:
     missing_task_ids: tuple[SourceIdentity, ...]
     completion_event_count: int
     last_completed_at: datetime | None
+    status: Status
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class GoalProgress:
     missing_task_ids: tuple[SourceIdentity, ...]
     completion_event_count: int
     last_completed_at: datetime | None
+    status: Status
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,8 @@ def _milestone(milestone, links, tasks, evidence):
     matches = [evidence[identity] for identity in linked if identity in evidence]
     return MilestoneProgress(milestone.id, milestone.goal_id, linked, active, completed,
                              missing, sum(count for count, _ in matches),
-                             max((stamp for _, stamp in matches), default=None))
+                             max((stamp for _, stamp in matches), default=None),
+                             status=milestone.status)
 
 
 def project_milestone_progress(
@@ -115,5 +118,6 @@ def project_progress(
                                           'completed_task_ids', 'missing_task_ids')),
             sum(child.completion_event_count for child in children),
             max((child.last_completed_at for child in children
-                 if child.last_completed_at is not None), default=None)))
+                 if child.last_completed_at is not None), default=None),
+            status=goal.status))
     return ProgressProjection(milestones, tuple(goals))

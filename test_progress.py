@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from integrations.task_state import (GhostTask, GhostTaskState, SnapshotProvenance,
                                      SourceIdentity, TaskStatus)
 from integrations.todoist.completion_events import TaskCompletionEvent
-from integrations.todoist.goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
+from integrations.todoist.goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink, with_goal_status, with_milestone_status
 from integrations.todoist.progress import (ProjectionError, project_progress,
                                            project_milestone_progress)
 
@@ -38,6 +38,33 @@ def registry(*ids):
 class ProgressTests(unittest.TestCase):
     def project(self, tasks=(), events=(), ids=('a',)):
         return project_milestone_progress(registry(*ids), state(*tasks), events, 'm')
+
+    def test_explicit_status_is_independent_of_all_evidence(self):
+        for goal_status in Status:
+            for milestone_status in Status:
+                r = with_goal_status(registry('a'), 'g', goal_status)
+                r = with_milestone_status(r, 'm', milestone_status)
+                for current in (state(), state(task()), state(task(status=TaskStatus.COMPLETED))):
+                    for events in ((), (event(),)):
+                        p = project_progress(r, current, events)
+                        self.assertIs(p.goals[0].status, goal_status)
+                        self.assertIs(p.milestones[0].status, milestone_status)
+                        self.assertIs(project_milestone_progress(r, current, events, 'm').status,
+                                      milestone_status)
+
+    def test_complete_milestone_keeps_active_tasks_and_history(self):
+        r = with_goal_status(registry('a', 'b'), 'g', Status.ACTIVE)
+        r = with_milestone_status(r, 'm', Status.ACTIVE)
+        current = state(task('a'), task('b'))
+        events = [event('a', f'2026-09-{day:02}T12:00:00Z') for day in (1, 3, 5, 8, 12)]
+        before = project_progress(r, current, events)
+        updated = with_milestone_status(r, 'm', Status.COMPLETE)
+        after = project_progress(updated, current, events)
+        self.assertEqual(after.milestones[0], replace(before.milestones[0], status=Status.COMPLETE))
+        self.assertEqual(after.goals, before.goals)
+        self.assertEqual(len(after.milestones[0].active_task_ids), 2)
+        self.assertEqual(after.milestones[0].completion_event_count, 5)
+        self.assertIs(r.milestones[0].status, Status.ACTIVE)
 
     def test_active_actual_models(self):
         result = project_progress(registry('a'), state(task()), ())

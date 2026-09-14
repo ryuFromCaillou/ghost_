@@ -8,10 +8,10 @@ import tempfile
 
 if __package__:
     from .paths import GOAL_REGISTRY_PATH
-    from .goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
+    from .goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 else:
     from paths import GOAL_REGISTRY_PATH
-    from goals import Goal, GoalRegistry, Milestone, TaskMilestoneLink
+    from goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 
 DEFAULT_PATH = GOAL_REGISTRY_PATH
 _MODELS = {'goals': Goal, 'milestones': Milestone, 'task_links': TaskMilestoneLink}
@@ -47,7 +47,11 @@ def load_goal_registry(path=DEFAULT_PATH) -> GoalRegistry:
             rows = payload[name]
             if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                 raise ValueError(f'{name} must be an array of objects')
-            collections[name] = [model(**row) for row in rows]
+            collections[name] = []
+            for row in rows:
+                if model in (Goal, Milestone) and 'status' in row:
+                    row = dict(row, status=Status(row['status']))
+                collections[name].append(model(**row))
         return GoalRegistry(**collections)
     except (OSError, TypeError, ValueError, RecursionError) as exc:
         raise GoalStoreError('Could not load goal registry') from exc
