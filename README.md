@@ -527,3 +527,50 @@ No CLI is added in this phase. The core is ready for a later `ghost brief` adapt
 that adapter must own durable loading and the policy for unavailable snapshots,
 registries, or history. The brief itself introduces no loading or fallback policy.
 There is no scheduling, execution, notification, persistence, or provider write-back.
+
+## Running GHOST
+
+From this checkout (`~/ghost/integrations/todoist`):
+
+```sh
+./ghost brief
+```
+
+Or from `~/ghost`:
+
+```sh
+python3 -m integrations.todoist.runtime brief
+```
+
+The executable resolves imports relative to its checkout. To use `ghost brief`
+without `./`, add this checkout directory to your shell's `PATH`; no package
+installation is required.
+
+`ghost brief` is read-only. It reads the most recently published local Todoist
+snapshot, using the canonical defaults in `paths.py`:
+
+- `~/ghost/integrations/state/external/todoist/`: the published symlink containing
+  `tasks.json`, `projects.json`, `sections.json`, and `sync_metadata.json`.
+- `~/ghost/integrations/state/goals.json`: the explicitly stored goal registry.
+- `~/ghost/integrations/state/todoist-history.sqlite3`: all locally stored completion
+  events, through the existing read-only `completion_events.load_events()` API,
+  without a date filter or network ingestion.
+
+```text
+sync  -> refresh reality
+brief -> interpret current stored reality
+```
+
+The command does **not** sync Todoist, change tasks, change semantic status, or
+execute work. It does not create, repair, or migrate missing or invalid state.
+An explicitly stored empty registry follows the existing domain behavior; a
+missing registry or history database is an error, not empty evidence.
+
+Successful execution prints only the existing rendered brief and exits with 0.
+State or domain failures print `GHOST ERROR` and a concise explanation to stderr
+and exit with 1, without a traceback. `runtime.run_brief()` accepts optional
+`snapshot_path`, `registry_path`, and `history_path` arguments for isolated runs;
+its `BriefRunError.__cause__` retains the original storage/domain exception.
+The frozen `BriefRun` result exposes every pipeline stage, including the validated
+snapshot timestamp at `run.snapshot.metadata['synced_at']`. Old snapshots are
+accepted without a freshness threshold; timestamps are not added to the brief.
