@@ -96,10 +96,10 @@ lexicographic `order_key` sorting within sibling scopes.
 GHOST BRIEF
 
 WHY
-Show my family that chasing your dreams is possible.
+Make time for meaningful work.
 
 DIRECTION
-Become a traveler / documentarian.
+Build a useful project.
 
 PRIMARY ORDER
 Check codes
@@ -130,8 +130,8 @@ Shared durable files live under `~/ghost/integrations/state/`:
 
 ```json
 {
-  "why": "Show my family that chasing your dreams is possible.",
-  "direction": "Become a traveler / documentarian."
+  "why": "Make time for meaningful work.",
+  "direction": "Build a useful project."
 }
 ```
 

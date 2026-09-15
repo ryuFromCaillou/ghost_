@@ -8,10 +8,10 @@ from integrations.todoist.strategic_context import StrategicContext
 from integrations.todoist.task_selection import select_task
 from test_task_selection import task, state
 
-CONTEXT = StrategicContext('Show my family that chasing your dreams is possible.',
-                           'Become a traveler / documentarian.')
-HEADER = ('GHOST BRIEF\n\nWHY\nShow my family that chasing your dreams is possible.\n\n'
-          'DIRECTION\nBecome a traveler / documentarian.\n\nPRIMARY ORDER\n')
+CONTEXT = StrategicContext('Make time for meaningful work.',
+                           'Build a useful project.')
+HEADER = ('GHOST BRIEF\n\nWHY\nMake time for meaningful work.\n\n'
+          'DIRECTION\nBuild a useful project.\n\nPRIMARY ORDER\n')
 
 
 class BriefTests(unittest.TestCase):

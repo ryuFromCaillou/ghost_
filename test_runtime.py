@@ -32,8 +32,8 @@ class RuntimeTests(unittest.TestCase):
                                      self.row('leaf', 'Check codes', parent_id='parent'),
                                      self.row('next', 'Other work', child_order=2)])
         self.publish()
-        self.context.write_text(json.dumps({'why':'Show my family that chasing your dreams is possible.',
-                                           'direction':'Become a traveler / documentarian.'}))
+        self.context.write_text(json.dumps({'why':'Make time for meaningful work.',
+                                           'direction':'Build a useful project.'}))
         append_events(self.history, [])
         self.kwargs = dict(snapshot_path=self.snapshot, context_path=self.context)
 
