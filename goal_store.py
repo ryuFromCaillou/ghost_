@@ -8,13 +8,13 @@ import tempfile
 
 if __package__:
     from .paths import GOAL_REGISTRY_PATH
-    from .goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
+    from .goals import Why, Direction, Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 else:
     from paths import GOAL_REGISTRY_PATH
-    from goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
+    from goals import Why, Direction, Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 
 DEFAULT_PATH = GOAL_REGISTRY_PATH
-_MODELS = {'goals': Goal, 'milestones': Milestone, 'task_links': TaskMilestoneLink}
+_MODELS = {'whys': Why, 'directions': Direction, 'goals': Goal, 'milestones': Milestone, 'task_links': TaskMilestoneLink}
 
 
 class GoalStoreError(Exception):
@@ -41,7 +41,7 @@ def load_goal_registry(path=DEFAULT_PATH) -> GoalRegistry:
             payload = json.load(stream, object_pairs_hook=_object,
                                 parse_constant=_invalid_constant)
         if not isinstance(payload, dict) or set(payload) != set(_MODELS):
-            raise ValueError('Expected exactly goals, milestones, and task_links')
+            raise ValueError('Expected exactly whys, directions, goals, milestones, and task_links')
         collections = {}
         for name, model in _MODELS.items():
             rows = payload[name]
@@ -88,6 +88,8 @@ def main():
     except GoalStoreError:
         print('Could not load goal registry', file=sys.stderr)
         return 1
+    print(f'Whys: {len(registry.whys)}')
+    print(f'Directions: {len(registry.directions)}')
     print(f'Goals: {len(registry.goals)}')
     print(f'Milestones: {len(registry.milestones)}')
     print(f'Task links: {len(registry.task_links)}')

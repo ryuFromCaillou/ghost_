@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from integrations.todoist.goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
+from integrations.todoist.goals import Why, Direction, Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 from integrations.todoist.progress import project_progress
 from integrations.todoist.objective import (ObjectiveSelectionError, SELECTED_REASONS,
                                            select_objective)
@@ -14,20 +14,20 @@ from test_progress import task, state, event
 
 
 def single(goal_status=Status.ACTIVE, milestone_status=Status.ACTIVE, links=('a',)):
-    return GoalRegistry([Goal('g', 'Goal', status=goal_status)],
-                        [Milestone('m', 'g', 'Milestone', status=milestone_status)],
-                        [TaskMilestoneLink('todoist', id, 'm') for id in links])
+    return GoalRegistry(goals=[Goal('g', 'Goal', status=goal_status, direction_id='d')],
+                        milestones=[Milestone('m', 'g', 'Milestone', status=milestone_status)],
+                        task_links=[TaskMilestoneLink('todoist', id, 'm') for id in links], directions=[Direction('d', 'Learning')], whys=[])
 
 
 def priority_registry():
     return GoalRegistry(
-        [Goal('thesis', 'Thesis', status=Status.ACTIVE),
-         Goal('revenue', 'Revenue', status=Status.ACTIVE)],
-        [Milestone('portfolio_offer', 'revenue', 'Portfolio offer', status=Status.ACTIVE),
+        goals=[Goal('thesis', 'Thesis', status=Status.ACTIVE, direction_id='d'),
+         Goal('revenue', 'Revenue', status=Status.ACTIVE, direction_id='d')],
+        milestones=[Milestone('portfolio_offer', 'revenue', 'Portfolio offer', status=Status.ACTIVE),
          Milestone('experimental_validation', 'thesis', 'Experimental validation', status=Status.BLOCKED),
          Milestone('manuscript', 'thesis', 'Manuscript', status=Status.ACTIVE)],
-        [TaskMilestoneLink('todoist', 'offer', 'portfolio_offer'),
-         TaskMilestoneLink('todoist', 'write', 'manuscript')])
+        task_links=[TaskMilestoneLink('todoist', 'offer', 'portfolio_offer'),
+         TaskMilestoneLink('todoist', 'write', 'manuscript')], directions=[Direction('d', 'Learning')], whys=[])
 
 
 class ObjectiveTests(unittest.TestCase):
@@ -77,7 +77,7 @@ class ObjectiveTests(unittest.TestCase):
                 self.assertEqual(result.excluded[0].reason_code, 'no_actionable_tasks')
 
     def test_empty_registry_and_goal_without_milestones(self):
-        for r in (GoalRegistry(), GoalRegistry([Goal('g', '', status=Status.ACTIVE)])):
+        for r in (GoalRegistry(), GoalRegistry(goals=[Goal('g', '', status=Status.ACTIVE, direction_id='d')], directions=[Direction('d', 'Learning')], whys=[])):
             result = self.select(r, state())
             self.assertIsNone(result.objective)
             self.assertEqual(result.considered_milestone_ids, ())
@@ -121,10 +121,10 @@ class ObjectiveTests(unittest.TestCase):
                          (SourceIdentity('other', '123'), SourceIdentity('todoist', '123')))
 
     def test_full_in_memory_thesis_chain(self):
-        r = GoalRegistry([Goal('thesis', 'Thesis', status=Status.ACTIVE)],
-                         [Milestone('experimental_validation', 'thesis', 'Experimental validation', status=Status.ACTIVE),
+        r = GoalRegistry(goals=[Goal('thesis', 'Thesis', status=Status.ACTIVE, direction_id='d')],
+                         milestones=[Milestone('experimental_validation', 'thesis', 'Experimental validation', status=Status.ACTIVE),
                           Milestone('manuscript', 'thesis', 'Manuscript')],
-                         [TaskMilestoneLink('todoist', 'interpret_phase_21', 'experimental_validation')])
+                         task_links=[TaskMilestoneLink('todoist', 'interpret_phase_21', 'experimental_validation')], directions=[Direction('d', 'Learning')], whys=[])
         result = self.select(r, state(task('interpret_phase_21')))
         self.assertEqual(result.objective.goal_id, 'thesis')
         self.assertEqual(result.objective.milestone_id, 'experimental_validation')
@@ -194,6 +194,38 @@ class ObjectiveTests(unittest.TestCase):
                       if m.milestone_id == 'portfolio_offer' else m for m in p.milestones))
         with self.assertRaises(ObjectiveSelectionError):
             select_objective(r, bad)
+
+
+    def test_direction_order_does_not_change_goal_priority(self):
+        r = GoalRegistry(
+            whys=[Why('w', 'Reason')],
+            directions=[Direction('second', 'Second'), Direction('first', 'First', why_id='w')],
+            goals=[Goal('g1', 'First goal', status=Status.ACTIVE, direction_id='first'),
+                   Goal('g2', 'Second goal', status=Status.ACTIVE, direction_id='second')],
+            milestones=[Milestone('m1', 'g1', 'First milestone', status=Status.ACTIVE),
+                        Milestone('m2', 'g2', 'Second milestone', status=Status.ACTIVE)],
+            task_links=[TaskMilestoneLink('todoist', 'a', 'm1'),
+                        TaskMilestoneLink('todoist', 'b', 'm2')])
+        current = state(task('a'), task('b'))
+        for directions in (r.directions, tuple(reversed(r.directions))):
+            registry = replace(r, directions=directions)
+            selection = select_objective(registry, project_progress(registry, current, ()))
+            self.assertEqual(selection.objective.goal_id, 'g1')
+            self.assertEqual(registry.direction_for_goal(selection.objective.goal_id).id, 'first')
+            self.assertEqual(registry.why_for_goal(selection.objective.goal_id).id, 'w')
+
+    def test_projection_ancestry_mismatch_rejected(self):
+        r = GoalRegistry(directions=[Direction('d', '')],
+                         goals=[Goal('g', '', direction_id='d')])
+        p = project_progress(r, state(), ())
+        for updates in ({'direction_id': 'wrong'}, {'why_id': 'wrong'}):
+            bad = replace(p, goals=(replace(p.goals[0], **updates),))
+            with self.assertRaisesRegex(ObjectiveSelectionError, 'Goal ancestry mismatch'):
+                select_objective(r, bad)
+
+    def test_why_and_direction_alone_create_no_objective(self):
+        r = GoalRegistry(whys=[Why('w', '')], directions=[Direction('d', '', why_id='w')])
+        self.assertIsNone(select_objective(r, project_progress(r, state(task()), (event(),))).objective)
 
 
 if __name__ == '__main__':

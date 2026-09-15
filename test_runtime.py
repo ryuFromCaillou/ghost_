@@ -161,17 +161,17 @@ class RuntimeTests(unittest.TestCase):
             return replace(state, tasks=tuple(replace(t, title='Normalized ' + t.title)
                                               for t in state.tasks))
         with patch.object(runtime, 'normalize_todoist_snapshot', side_effect=normalize):
-            self.assertIn('- Normalized Write methods\n', self.cli()[1])
+            self.assertIn('PRIMARY ORDER\nNormalized Write methods\n', self.cli()[1])
 
     def test_explicit_empty_registry(self):
         save_goal_registry(GoalRegistry(), self.goals)
-        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY\nNone\n\nNo actionable work.\n', ''))
+        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n\nNo actionable work.\n', ''))
 
     def test_blocked_without_objective(self):
         registry = replace(self.registry, milestones=tuple(replace(m, status=Status.BLOCKED)
                                                            for m in self.registry.milestones))
         save_goal_registry(registry, self.goals)
-        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY\nNone\n\nBLOCKED\n'
+        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n\nBLOCKED\n'
                                      '- Thesis — Experimental validation\n- Thesis — Manuscript\n'
                                      '- Revenue — Portfolio offer\n', ''))
 
@@ -198,3 +198,22 @@ class RuntimeTests(unittest.TestCase):
                                         env=env, capture_output=True, text=True)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (0, PRIMARY + BLOCKED + QUEUED, ''))
+
+
+    def test_malformed_hierarchy_error_boundary(self):
+        for collection, field in [('directions', 'why_id'), ('goals', 'direction_id')]:
+            save_goal_registry(self.registry, self.goals)
+            payload = json.loads(self.goals.read_text())
+            payload[collection][0][field] = 'unknown'
+            self.goals.write_text(json.dumps(payload))
+            before = self.contents()
+            self.assert_failure('Goal registry unavailable or invalid')
+            self.assertEqual(self.contents(), before)
+
+    def test_extended_pipeline_ancestry(self):
+        run = runtime.run_brief(**self.kwargs)
+        self.assertEqual(run.projection.goals[0].direction_id, 'd')
+        self.assertEqual(run.projection.goals[0].why_id, 'w')
+        self.assertEqual(run.registry.why_for_goal(run.selection.objective.goal_id).id, 'w')
+        self.assertEqual(run.brief.primary.why_title, 'Keep growing')
+        self.assertEqual(run.brief.primary.direction_title, 'Learning')

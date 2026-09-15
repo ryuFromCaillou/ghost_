@@ -33,6 +33,8 @@ class MilestoneProgress:
 @dataclass(frozen=True)
 class GoalProgress:
     goal_id: str
+    direction_id: str
+    why_id: str | None
     milestone_ids: tuple[str, ...]
     linked_task_ids: tuple[SourceIdentity, ...]
     active_task_ids: tuple[SourceIdentity, ...]
@@ -113,7 +115,8 @@ def project_progress(
             return tuple(dict.fromkeys(identity for child in children
                                        for identity in getattr(child, field)))
         goals.append(GoalProgress(
-            goal.id, tuple(child.milestone_id for child in children),
+            goal.id, goal.direction_id, registry.get_direction(goal.direction_id).why_id,
+            tuple(child.milestone_id for child in children),
             *(combine(field) for field in ('linked_task_ids', 'active_task_ids',
                                           'completed_task_ids', 'missing_task_ids')),
             sum(child.completion_event_count for child in children),

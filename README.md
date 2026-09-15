@@ -297,6 +297,74 @@ to three months. No live account import is part of the automated validation.
 Run `python3 -m unittest -v` from this directory to test both pipelines, including
 history persistence after a task disappears from a subsequently published snapshot.
 
+## Semantic hierarchy
+
+| Layer | Meaning |
+| --- | --- |
+| WHY | Governing reason / principle |
+| DIRECTION | Long-horizon orientation |
+| GOAL | Strategic state/program |
+| MILESTONE | Meaningful state checkpoint |
+| OBJECTIVE | Runtime-selected bounded target |
+| TASK | Executable provider-owned action |
+
+Example (illustrative only; no user registry is seeded):
+
+- Why: Show my family that chasing your dreams is possible.
+- Direction: Become a traveler / documentarian.
+- Goal: Financial independence.
+- Milestone: First repeatable $1,000/month income stream established.
+- Objective: Publish and pitch one concrete service this week.
+- Task: Build service landing page.
+
+`Why` and `Direction` are frozen descriptive records without Status. A Direction
+may reference zero or one Why. Every Goal must reference exactly one Direction;
+every Milestone references one Goal. Only Goal and Milestone have explicit Status.
+Task evidence never completes a Direction or Why, and neither has task links.
+The example's objective wording does not introduce a scheduling policy or change
+the selector's existing milestone summary.
+
+Objective is **not persisted in GoalRegistry**: `objective.py` derives it at runtime.
+Task remains provider-owned; `TaskMilestoneLink` attaches its provider identity to
+at most one milestone. Completion history remains separate immutable evidence.
+
+The JSON registry requires exactly these five top-level collections (shown with
+illustrative records to specify the saved fields):
+
+```json
+{
+  "whys": [{"id": "w", "title": "Reason", "description": null}],
+  "directions": [{"id": "d", "title": "Orientation", "description": null, "why_id": "w"}],
+  "goals": [{"id": "g", "title": "Program", "description": null, "direction_id": "d", "status": "planned"}],
+  "milestones": [{"id": "m", "goal_id": "g", "title": "Checkpoint", "description": null, "status": "planned"}],
+  "task_links": [{"task_source": "todoist", "task_source_id": "t", "milestone_id": "m"}]
+}
+```
+
+Collections may be empty; `Direction.why_id` may be null. The writer preserves
+collection order and uses deterministic sorted JSON keys. Missing `whys` or
+`directions`, missing Goal direction IDs, and unresolved references are rejected.
+Old goals-only files are not migrated or assigned an inferred direction. Loading
+never creates or rewrites state. Optional descriptions and Why references retain
+their model defaults; omitted Goal/Milestone statuses still default to PLANNED.
+
+Python construction makes the Goal relationship explicit:
+`Goal('g', 'Program', direction_id='d')`. `direction_id` is required and keyword-only;
+existing positional title/description/status arguments retain their meanings.
+`GoalRegistry` collections are ordered as `whys, directions, goals, milestones,
+task_links`; use keyword arguments when constructing registries. Lists normalize
+to immutable tuples. Lookup and ancestry helpers return None for unknown inputs
+or an absent optional Why.
+
+`GoalProgress` includes `direction_id` and optional `why_id` as ancestry only;
+there are no Direction/Why progress percentages or completion states. The selector
+validates these IDs against the registry and retains goal-order priority, then
+milestone order within each goal. Direction and Why order do not affect priority.
+
+The registry inspection command (`python3 -m integrations.todoist.goal_store`
+from `~/ghost`) prints only Whys, Directions, Goals, Milestones, and Task links
+counts, in that order.
+
 ## Read-only progress projection
 
 ```text
@@ -485,7 +553,7 @@ text = render_brief(brief)
 ```
 
 `build_brief` performs no loading, projection rebuilding, or objective selection.
-It resolves goal/milestone titles from GoalRegistry and task content from normalized
+It resolves Why/Direction/goal/milestone titles from GoalRegistry and task content from normalized
 `GhostTask.title`, never raw Todoist data. It preserves the supplied objective's
 summary and task order. Frozen models are `BriefTask`, `BriefObjective`,
 `BriefBlockedItem`, `BriefQueuedItem`, and `GhostBrief`; collections are tuples and
@@ -516,16 +584,18 @@ projection set. Every selected task must resolve to one ACTIVE normalized task.
 The selector's existing validation is exposed as `validate_projection` and reused
 without running selection. No source is repaired or mutated.
 
-`render_brief` emits plain text with `GHOST BRIEF`, PRIMARY, and, when a primary
-exists, TASKS. Nonempty BLOCKED and QUEUED sections follow. Empty PRIMARY prints
+`render_brief` emits plain text with `GHOST BRIEF`. A selected primary adds WHY
+when its Direction references a Why, then DIRECTION, PRIMARY, and TASKS. Without
+a selected primary, neither ancestry section is shown. `BriefObjective` carries
+`direction_id`, `direction_title`, `why_id`, and `why_title` (the latter two may
+be None). Nonempty BLOCKED and QUEUED sections follow. Empty PRIMARY prints
 `None`; a completely empty brief adds `No actionable work.`. Output uses blank
 lines between sections and one final newline. IDs, reason/message codes, timestamps,
 completion counts, and diagnostic metadata are not printed. Titles, task content,
 and the supplied summary are rendered directly without generated prose.
 
-No CLI is added in this phase. The core is ready for a later `ghost brief` adapter;
-that adapter must own durable loading and the policy for unavailable snapshots,
-registries, or history. The brief itself introduces no loading or fallback policy.
+The `ghost brief` runtime adapter owns durable loading and the error boundary
+for unavailable snapshots, registries, or history. The brief itself introduces no loading or fallback policy.
 There is no scheduling, execution, notification, persistence, or provider write-back.
 
 ## Running GHOST

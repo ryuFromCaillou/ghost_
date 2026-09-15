@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from integrations.task_state import SourceIdentity, TaskStatus
-from integrations.todoist.goals import Goal, Milestone, GoalRegistry, Status, TaskMilestoneLink
+from integrations.todoist.goals import Why, Direction, Goal, Milestone, GoalRegistry, Status, TaskMilestoneLink
 from integrations.todoist.progress import project_progress
 from integrations.todoist.objective import select_objective
 from integrations.todoist.brief import BriefError, build_brief, render_brief
@@ -15,14 +15,15 @@ from test_progress import task, state, event
 
 def fixture():
     registry = GoalRegistry(
-        [Goal('thesis', 'Thesis', status=Status.ACTIVE),
-         Goal('revenue', 'Revenue', status=Status.ACTIVE)],
-        [Milestone('experimental_validation', 'thesis', 'Experimental validation', status=Status.BLOCKED),
+        goals=[Goal('thesis', 'Thesis', status=Status.ACTIVE, direction_id='d'),
+         Goal('revenue', 'Revenue', status=Status.ACTIVE, direction_id='d')],
+        milestones=[Milestone('experimental_validation', 'thesis', 'Experimental validation', status=Status.BLOCKED),
          Milestone('manuscript', 'thesis', 'Manuscript', status=Status.ACTIVE),
          Milestone('portfolio_offer', 'revenue', 'Portfolio offer', status=Status.ACTIVE)],
-        [TaskMilestoneLink('todoist', 'write_methods', 'manuscript'),
+        task_links=[TaskMilestoneLink('todoist', 'write_methods', 'manuscript'),
          TaskMilestoneLink('todoist', 'incorporate_diagnostics', 'manuscript'),
-         TaskMilestoneLink('todoist', 'send_offer', 'portfolio_offer')])
+         TaskMilestoneLink('todoist', 'send_offer', 'portfolio_offer')], directions=[Direction('d', 'Learning', why_id='w')],
+        whys=[Why('w', 'Keep growing')])
     current = state(*(replace(task(id), title=title, raw={'content': 'Do not read raw text'})
                       for id, title in [('send_offer', 'Send offer'),
                                         ('incorporate_diagnostics', 'Incorporate diagnostics'),
@@ -38,13 +39,20 @@ def pipeline(registry, current, events=()):
 
 PRIMARY = '''GHOST BRIEF
 
-PRIMARY
+WHY
+Keep growing
+
+DIRECTION
+Learning
+
+PRIMARY ORDER
+Write methods
+
+ADVANCES
 Thesis
 Manuscript
-Advance milestone: Manuscript
 
-TASKS
-- Write methods
+NEXT
 - Incorporate diagnostics
 '''
 BLOCKED = '\nBLOCKED\n- Thesis — Experimental validation\n'
@@ -84,12 +92,12 @@ class BriefTests(unittest.TestCase):
 
     def test_no_primary_blocked_exact_render(self):
         brief = pipeline(self.registry, state())
-        self.assertEqual(render_brief(brief), 'GHOST BRIEF\n\nPRIMARY\nNone\n' + BLOCKED)
+        self.assertEqual(render_brief(brief), 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n' + BLOCKED)
         self.assertEqual(brief.message_codes, ('no_primary_objective', 'blocked_work_present'))
 
     def test_empty_exact_render(self):
         brief = pipeline(GoalRegistry(), state())
-        self.assertEqual(render_brief(brief), 'GHOST BRIEF\n\nPRIMARY\nNone\n\nNo actionable work.\n')
+        self.assertEqual(render_brief(brief), 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n\nNo actionable work.\n')
         self.assertEqual(brief.message_codes, ('no_primary_objective', 'no_actionable_work'))
 
     def test_reordered_goals(self):
@@ -97,13 +105,18 @@ class BriefTests(unittest.TestCase):
         brief = pipeline(r, self.current)
         self.assertEqual(render_brief(brief), '''GHOST BRIEF
 
-PRIMARY
+WHY
+Keep growing
+
+DIRECTION
+Learning
+
+PRIMARY ORDER
+Send offer
+
+ADVANCES
 Revenue
 Portfolio offer
-Advance milestone: Portfolio offer
-
-TASKS
-- Send offer
 
 BLOCKED
 - Thesis — Experimental validation
@@ -150,11 +163,11 @@ QUEUED
         for internal in ('SourceIdentity', 'todoist', 'write_methods', 'Do not read raw text', 'primary_objective_selected'):
             self.assertNotIn(internal, text)
 
-    def test_preserves_supplied_task_order_and_summary(self):
+    def test_registry_order_overrides_objective_task_order(self):
         objective = replace(self.selection.objective, task_ids=tuple(reversed(self.selection.objective.task_ids)),
                             summary='Advance this supplied decision')
         brief = self.build(selection=replace(self.selection, objective=objective))
-        self.assertEqual(tuple(t.source for t in brief.primary.tasks), objective.task_ids)
+        self.assertEqual(tuple(t.source for t in brief.primary.tasks), self.selection.objective.task_ids)
         self.assertEqual(brief.primary.summary, objective.summary)
 
     def test_does_not_reselect_or_promote_when_primary_absent(self):
@@ -233,6 +246,26 @@ QUEUED
                 setattr(obj, field, 'changed')
         with self.assertRaises(TypeError):
             first.primary.tasks[0] = None
+
+
+    def test_ancestry_fields_and_optional_why_render(self):
+        brief = pipeline(self.registry, self.current)
+        self.assertEqual((brief.primary.direction_id, brief.primary.direction_title,
+                          brief.primary.why_id, brief.primary.why_title),
+                         ('d', 'Learning', 'w', 'Keep growing'))
+        r = replace(self.registry, whys=(), directions=[Direction('d', 'Learning')])
+        brief = pipeline(r, self.current)
+        self.assertIsNone(brief.primary.why_id)
+        self.assertIsNone(brief.primary.why_title)
+        expected = (PRIMARY + BLOCKED + QUEUED).replace('WHY\nKeep growing\n\n', '')
+        self.assertEqual(render_brief(brief), expected)
+        self.assertEqual(render_brief(brief), render_brief(pipeline(r, self.current)))
+
+    def test_stale_projection_ancestry_fails_brief(self):
+        bad = replace(self.projection, goals=tuple(replace(g, direction_id='wrong')
+                                                  for g in self.projection.goals))
+        with self.assertRaisesRegex(BriefError, 'Goal ancestry mismatch'):
+            build_brief(self.registry, self.current, bad, self.selection)
 
 
 if __name__ == '__main__':

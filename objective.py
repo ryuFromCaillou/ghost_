@@ -86,6 +86,9 @@ def validate_projection(registry: GoalRegistry, projection: ProgressProjection):
     for goal in registry.goals:
         p = goals[goal.id]
         members = children[goal.id]
+        if (p.direction_id != goal.direction_id
+                or p.why_id != registry.get_direction(goal.direction_id).why_id):
+            raise ObjectiveSelectionError(f'Goal ancestry mismatch: {goal.id}')
         if p.status is not goal.status or p.milestone_ids != tuple(m.milestone_id for m in members):
             raise ObjectiveSelectionError(f'Goal status/milestones mismatch: {goal.id}')
         for field in task_fields:

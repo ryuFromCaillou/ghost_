@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from goal_store import GoalStoreError, load_goal_registry, save_goal_registry
-from goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
+from goals import Why, Direction, Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink
 
 
 class GoalStoreTests(unittest.TestCase):
@@ -19,9 +19,10 @@ class GoalStoreTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / 'state/goals.json'
         self.registry = GoalRegistry(
-            [Goal('g', 'Apprendre café', '日本語')],
-            [Milestone('m2', 'g', 'Practice'), Milestone('m1', 'g', 'Read')],
-            [TaskMilestoneLink('todoist', 't', 'm1')])
+            goals=[Goal('g', 'Apprendre café', '日本語', direction_id='d')],
+            milestones=[Milestone('m2', 'g', 'Practice'), Milestone('m1', 'g', 'Read')],
+            task_links=[TaskMilestoneLink('todoist', 't', 'm1')], directions=[Direction('d', 'Learning', why_id='w')],
+            whys=[Why('w', 'Keep growing')])
         self.payload = json.loads(json.dumps(asdict(self.registry)))
 
     def write(self, value):
@@ -149,7 +150,7 @@ class GoalStoreTests(unittest.TestCase):
         self.assert_invalid(self.payload, TypeError)
 
     def test_duplicate_ids(self):
-        for name in ('goals', 'milestones'):
+        for name in ('whys', 'directions', 'goals', 'milestones'):
             with self.subTest(name=name):
                 payload = deepcopy(self.payload)
                 payload[name].append(payload[name][0])
@@ -219,7 +220,7 @@ class GoalStoreTests(unittest.TestCase):
                                 env=dict(os.environ, HOME=self.directory.name),
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, 'Goals: 1\nMilestones: 2\nTask links: 1\n')
+        self.assertEqual(result.stdout, 'Whys: 1\nDirections: 1\nGoals: 1\nMilestones: 2\nTask links: 1\n')
         self.assertEqual(result.stderr, '')
 
     def test_cli_error_hides_content(self):
@@ -234,6 +235,44 @@ class GoalStoreTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, '')
         self.assertEqual(result.stderr, 'Could not load goal registry\n')
+
+
+    def test_invalid_ancestry_references(self):
+        for collection, field in [('directions', 'why_id'), ('goals', 'direction_id')]:
+            payload = deepcopy(self.payload)
+            payload[collection][0][field] = 'missing'
+            self.assert_invalid(payload)
+        payload = deepcopy(self.payload)
+        del payload['goals'][0]['direction_id']
+        self.assert_invalid(payload, TypeError)
+
+    def test_ancestry_has_no_persisted_status(self):
+        save_goal_registry(self.registry, self.path)
+        payload = json.loads(self.path.read_text())
+        self.assertEqual(set(payload), {'whys', 'directions', 'goals', 'milestones', 'task_links'})
+        for collection in ('whys', 'directions'):
+            self.assertNotIn('status', payload[collection][0])
+            invalid = deepcopy(payload)
+            invalid[collection][0]['status'] = 'active'
+            self.assert_invalid(invalid, TypeError)
+
+    def test_old_schema_rejected_without_rewrite(self):
+        payload = {k: v for k, v in self.payload.items() if k not in ('whys', 'directions')}
+        self.write(payload)
+        before = self.path.read_bytes()
+        with self.assertRaises(GoalStoreError) as caught:
+            load_goal_registry(self.path)
+        self.assertIn('Expected exactly whys, directions', str(caught.exception.__cause__))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_optional_why_round_trip(self):
+        self.payload['whys'] = []
+        self.payload['directions'][0]['why_id'] = None
+        self.write(self.payload)
+        registry = load_goal_registry(self.path)
+        save_goal_registry(registry, self.path)
+        self.assertEqual(load_goal_registry(self.path), registry)
+        self.assertIsNone(registry.why_for_goal('g'))
 
 
 if __name__ == '__main__':

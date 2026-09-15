@@ -4,7 +4,7 @@ Collections accept lists or tuples and preserve order as immutable tuples.
 Invalid models or registries raise ValueError; missing lookups return None.
 Task existence and completion remain the task provider's responsibility.
 """
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 
@@ -35,7 +35,33 @@ def _content(title, description):
 
 
 @dataclass(frozen=True)
+class Why:
+    id: str
+    title: str
+    description: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.id, 'id')
+        _content(self.title, self.description)
+
+
+@dataclass(frozen=True)
+class Direction:
+    id: str
+    title: str
+    description: str | None = None
+    why_id: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.id, 'id')
+        _content(self.title, self.description)
+        if self.why_id is not None:
+            _identifier(self.why_id, 'why_id')
+
+
+@dataclass(frozen=True)
 class Goal:
+    direction_id: str = field(kw_only=True)
     id: str
     title: str
     description: str | None = None
@@ -45,6 +71,7 @@ class Goal:
         _identifier(self.id, 'id')
         _content(self.title, self.description)
         _status(self.status)
+        _identifier(self.direction_id, 'direction_id')
 
 
 @dataclass(frozen=True)
@@ -75,12 +102,15 @@ class TaskMilestoneLink:
 
 @dataclass(frozen=True)
 class GoalRegistry:
+    whys: tuple[Why, ...] = ()
+    directions: tuple[Direction, ...] = ()
     goals: tuple[Goal, ...] = ()
     milestones: tuple[Milestone, ...] = ()
     task_links: tuple[TaskMilestoneLink, ...] = ()
 
     def __post_init__(self):
-        for name, model in (('goals', Goal), ('milestones', Milestone),
+        for name, model in (('whys', Why), ('directions', Direction),
+                            ('goals', Goal), ('milestones', Milestone),
                             ('task_links', TaskMilestoneLink)):
             values = getattr(self, name)
             if (not isinstance(values, (list, tuple))
@@ -91,12 +121,19 @@ class GoalRegistry:
         for model in (*self.goals, *self.milestones):
             _status(model.status)
 
-        goal_ids = {goal.id for goal in self.goals}
-        milestone_ids = {milestone.id for milestone in self.milestones}
-        if len(goal_ids) != len(self.goals):
-            raise ValueError('Duplicate goal IDs')
-        if len(milestone_ids) != len(self.milestones):
-            raise ValueError('Duplicate milestone IDs')
+        indexes = {}
+        for name in ('whys', 'directions', 'goals', 'milestones'):
+            values = getattr(self, name)
+            indexes[name] = {value.id for value in values}
+            if len(indexes[name]) != len(values):
+                raise ValueError(f'Duplicate {name[:-1]} IDs')
+        goal_ids, milestone_ids = indexes['goals'], indexes['milestones']
+        for direction in self.directions:
+            if direction.why_id is not None and direction.why_id not in indexes['whys']:
+                raise ValueError(f'Missing why: {direction.why_id}')
+        for goal in self.goals:
+            if goal.direction_id not in indexes['directions']:
+                raise ValueError(f'Missing direction: {goal.direction_id}')
         for milestone in self.milestones:
             if milestone.goal_id not in goal_ids:
                 raise ValueError(f'Missing goal: {milestone.goal_id}')
@@ -108,6 +145,33 @@ class GoalRegistry:
             if identity in identities:
                 raise ValueError(f'Duplicate task association: {identity}')
             identities.add(identity)
+
+    def get_why(self, why_id: str) -> Why | None:
+        return next((why for why in self.whys if why.id == why_id), None)
+
+    def get_direction(self, direction_id: str) -> Direction | None:
+        return next((direction for direction in self.directions
+                     if direction.id == direction_id), None)
+
+    def direction_for_goal(self, goal_id: str) -> Direction | None:
+        goal = self.get_goal(goal_id)
+        return None if goal is None else self.get_direction(goal.direction_id)
+
+    def direction_for_task(self, source: str, source_id: str) -> Direction | None:
+        goal = self.goal_for_task(source, source_id)
+        return None if goal is None else self.direction_for_goal(goal.id)
+
+    def why_for_direction(self, direction_id: str) -> Why | None:
+        direction = self.get_direction(direction_id)
+        return None if direction is None or direction.why_id is None else self.get_why(direction.why_id)
+
+    def why_for_goal(self, goal_id: str) -> Why | None:
+        direction = self.direction_for_goal(goal_id)
+        return None if direction is None else self.why_for_direction(direction.id)
+
+    def why_for_task(self, source: str, source_id: str) -> Why | None:
+        direction = self.direction_for_task(source, source_id)
+        return None if direction is None else self.why_for_direction(direction.id)
 
     def get_goal(self, goal_id: str) -> Goal | None:
         return next((goal for goal in self.goals if goal.id == goal_id), None)

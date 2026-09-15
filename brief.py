@@ -5,6 +5,7 @@ from ..task_state import GhostTaskState, SourceIdentity, TaskStatus
 from .goals import GoalRegistry, Status
 from .objective import ObjectiveSelection, ObjectiveSelectionError, validate_projection
 from .progress import ProgressProjection
+from .task_selection import TaskSelection, select_task
 
 
 class BriefError(ValueError):
@@ -19,12 +20,21 @@ class BriefTask:
 
 @dataclass(frozen=True)
 class BriefObjective:
+    direction_id: str
+    direction_title: str
+    why_id: str | None
+    why_title: str | None
     goal_id: str
     goal_title: str
     milestone_id: str
     milestone_title: str
     summary: str
-    tasks: tuple[BriefTask, ...]
+    primary_task: BriefTask | None
+    secondary_tasks: tuple[BriefTask, ...]
+
+    @property
+    def tasks(self) -> tuple[BriefTask, ...]:
+        return (() if self.primary_task is None else (self.primary_task,)) + self.secondary_tasks
 
 
 @dataclass(frozen=True)
@@ -52,12 +62,13 @@ class GhostBrief:
 
 
 def build_brief(registry: GoalRegistry, task_state: GhostTaskState,
-                projection: ProgressProjection, selection: ObjectiveSelection) -> GhostBrief:
+                projection: ProgressProjection, selection: ObjectiveSelection,
+                task_selection: TaskSelection | None = None) -> GhostBrief:
     """Present the supplied objective unchanged, with nearby blocked/ready work.
 
     Validate current classifications against supplied tasks, never rebuild a
     projection or select an objective. An absent objective stays absent, even if
-    actionable alternatives exist. Objective task order and summary are retained.
+    actionable alternatives exist. Task priority follows registry link order; the objective remains unchanged.
     """
     try:
         children = validate_projection(registry, projection)
@@ -95,9 +106,22 @@ def build_brief(registry: GoalRegistry, task_state: GhostTaskState,
         if (not objective.task_ids or len(set(objective.task_ids)) != len(objective.task_ids)
                 or set(objective.task_ids) != set(expected)):
             raise BriefError('Objective tasks must match the active linked projection task set')
-        primary = BriefObjective(goal.id, goal.title, milestone.id, milestone.title,
-                                 objective.summary, tuple(BriefTask(identity, tasks[identity].title)
-                                                          for identity in objective.task_ids))
+        expected_selection = select_task(registry, task_state,
+                                         None if objective is None else objective.milestone_id)
+        if task_selection is not None and task_selection != expected_selection:
+            raise BriefError("Task selection does not match current registry/task state")
+        task_selection = expected_selection
+        direction = registry.direction_for_goal(goal.id)
+        why = registry.why_for_goal(goal.id)
+        primary = BriefObjective(direction.id, direction.title,
+                                 None if why is None else why.id,
+                                 None if why is None else why.title,
+                                 goal.id, goal.title, milestone.id, milestone.title,
+                                 objective.summary,
+                                 None if task_selection.primary is None else BriefTask(
+                                     task_selection.primary.id, task_selection.primary.title),
+                                 tuple(BriefTask(task.id, task.title)
+                                       for task in task_selection.secondary))
     blocked, queued = [], []
     for goal in registry.goals:
         if goal.status is not Status.ACTIVE:
@@ -122,14 +146,21 @@ def build_brief(registry: GoalRegistry, task_state: GhostTaskState,
 
 def render_brief(brief: GhostBrief) -> str:
     """Plain deterministic sections, no metadata; return one trailing newline."""
-    lines = ['GHOST BRIEF', '', 'PRIMARY']
+    lines = ['GHOST BRIEF']
+    if brief.primary is not None:
+        if brief.primary.why_title is not None:
+            lines.extend(('', 'WHY', brief.primary.why_title))
+        lines.extend(('', 'DIRECTION', brief.primary.direction_title))
+    lines.extend(('', 'PRIMARY ORDER'))
     if brief.primary is None:
         lines.append('None')
     else:
         primary = brief.primary
-        lines.extend((primary.goal_title, primary.milestone_title, primary.summary,
-                      '', 'TASKS'))
-        lines.extend(f'- {task.content}' for task in primary.tasks)
+        lines.append('None' if primary.primary_task is None else primary.primary_task.content)
+        lines.extend(('', 'ADVANCES', primary.goal_title, primary.milestone_title))
+        if primary.secondary_tasks:
+            lines.extend(('', 'NEXT'))
+            lines.extend(f'- {task.content}' for task in primary.secondary_tasks)
     for heading, items in (('BLOCKED', brief.blocked), ('QUEUED', brief.queued)):
         if items:
             lines.extend(('', heading))

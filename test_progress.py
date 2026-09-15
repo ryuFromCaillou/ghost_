@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from integrations.task_state import (GhostTask, GhostTaskState, SnapshotProvenance,
                                      SourceIdentity, TaskStatus)
 from integrations.todoist.completion_events import TaskCompletionEvent
-from integrations.todoist.goals import Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink, with_goal_status, with_milestone_status
+from integrations.todoist.goals import Why, Direction, Goal, GoalRegistry, Milestone, Status, TaskMilestoneLink, with_goal_status, with_milestone_status
 from integrations.todoist.progress import (ProjectionError, project_progress,
                                            project_milestone_progress)
 
@@ -31,8 +31,8 @@ def event(id='a', stamp='2026-09-12T12:00:00Z', source='todoist'):
 
 
 def registry(*ids):
-    return GoalRegistry([Goal('g', 'Goal')], [Milestone('m', 'g', 'Milestone')],
-                        [TaskMilestoneLink('todoist', id, 'm') for id in ids])
+    return GoalRegistry(goals=[Goal('g', 'Goal', direction_id='d')], milestones=[Milestone('m', 'g', 'Milestone')],
+                        task_links=[TaskMilestoneLink('todoist', id, 'm') for id in ids], directions=[Direction('d', 'Learning')], whys=[])
 
 
 class ProgressTests(unittest.TestCase):
@@ -112,11 +112,11 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(m.completion_event_count, 2)
 
     def test_multiple_goals_milestones_and_order(self):
-        r = GoalRegistry([Goal('z', ''), Goal('a', '')],
-                         [Milestone('m2', 'z', ''), Milestone('m3', 'a', ''), Milestone('m1', 'z', '')],
-                         [TaskMilestoneLink('todoist', 'a', 'm1'),
+        r = GoalRegistry(goals=[Goal('z', '', direction_id='d'), Goal('a', '', direction_id='d')],
+                         milestones=[Milestone('m2', 'z', ''), Milestone('m3', 'a', ''), Milestone('m1', 'z', '')],
+                         task_links=[TaskMilestoneLink('todoist', 'a', 'm1'),
                           TaskMilestoneLink('todoist', 'c', 'm3'),
-                          TaskMilestoneLink('todoist', 'b', 'm2')])
+                          TaskMilestoneLink('todoist', 'b', 'm2')], directions=[Direction('d', 'Learning')], whys=[])
         events = [event('a', '2026-09-01T00:00:00Z'), event('b'), event('c')]
         p = project_progress(r, state(task('a'), task('b', TaskStatus.COMPLETED)), iter(events))
         self.assertEqual(tuple(m.milestone_id for m in p.milestones), ('m2', 'm3', 'm1'))
@@ -139,8 +139,8 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(m.completion_event_count, 0)
 
     def test_provider_collision_both_linked_retained(self):
-        r = GoalRegistry([Goal('g', '')], [Milestone('m', 'g', '')],
-                         [TaskMilestoneLink(source, '123', 'm') for source in ('todoist', 'other')])
+        r = GoalRegistry(goals=[Goal('g', '', direction_id='d')], milestones=[Milestone('m', 'g', '')],
+                         task_links=[TaskMilestoneLink(source, '123', 'm') for source in ('todoist', 'other')], directions=[Direction('d', 'Learning')], whys=[])
         p = project_progress(r, state(task('123'), task('123', TaskStatus.COMPLETED, 'other')),
                              [event('123'), event('123', source='other'), event('123', source='other')])
         g = p.goals[0]
@@ -161,7 +161,7 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(m.last_completed_at)
 
     def test_zero_milestones_and_empty_registry(self):
-        p = project_progress(GoalRegistry([Goal('g', '')]), state(), ())
+        p = project_progress(GoalRegistry(goals=[Goal('g', '', direction_id='d')], directions=[Direction('d', 'Learning')], whys=[]), state(), ())
         self.assertEqual(p.milestones, ())
         self.assertEqual(p.goals[0].milestone_ids, ())
         self.assertEqual(p.goals[0].linked_task_ids, ())
@@ -199,6 +199,23 @@ class ProgressTests(unittest.TestCase):
         for s in (state(task(), task()), state(replace(task(), status='unknown'))):
             with self.assertRaises(ProjectionError):
                 project_progress(registry('a'), s, ())
+
+
+    def test_ancestry_ids_without_completion_semantics(self):
+        r = replace(registry('a'), whys=[Why('w', 'Reason')],
+                    directions=[Direction('d', 'Learning', why_id='w')])
+        before = repr(r)
+        for status in Status:
+            updated = with_goal_status(r, 'g', status)
+            p = project_progress(updated, state(task(status=TaskStatus.COMPLETED)), (event(),))
+            self.assertEqual((p.goals[0].direction_id, p.goals[0].why_id), ('d', 'w'))
+            self.assertEqual(p.goals[0].completion_event_count, 1)
+            self.assertEqual(updated.directions, r.directions)
+            self.assertEqual(updated.whys, r.whys)
+            self.assertFalse(hasattr(updated.directions[0], 'status'))
+            self.assertFalse(hasattr(updated.whys[0], 'status'))
+        self.assertEqual(repr(r), before)
+        self.assertIsNone(project_progress(registry(), state(), ()).goals[0].why_id)
 
 
 if __name__ == '__main__':

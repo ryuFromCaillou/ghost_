@@ -13,6 +13,7 @@ from .goals import GoalRegistry
 from .normalize import NormalizationError, normalize_todoist_snapshot
 from .objective import ObjectiveSelection, ObjectiveSelectionError, select_objective
 from .progress import ProgressProjection, ProjectionError, project_progress
+from .task_selection import TaskSelection, TaskSelectionError, select_task
 from .reader import SnapshotReadError, TodoistSnapshot, load_snapshot
 
 
@@ -30,6 +31,7 @@ class BriefRun:
     projection: ProgressProjection
     selection: ObjectiveSelection
     brief: GhostBrief
+    task_selection: TaskSelection
 
 
 def run_brief(*, snapshot_path=None, registry_path=None, history_path=None) -> BriefRun:
@@ -61,10 +63,12 @@ def run_brief(*, snapshot_path=None, registry_path=None, history_path=None) -> B
     try:
         projection = project_progress(registry, task_state, events)
         selection = select_objective(registry, projection)
-        brief = build_brief(registry, task_state, projection, selection)
-    except (ProjectionError, ObjectiveSelectionError, BriefError) as exc:
+        task_selection = select_task(registry, task_state,
+                                     None if selection.objective is None else selection.objective.milestone_id)
+        brief = build_brief(registry, task_state, projection, selection, task_selection)
+    except (ProjectionError, ObjectiveSelectionError, TaskSelectionError, BriefError) as exc:
         raise BriefRunError(f'{type(exc).__name__}: {exc}') from exc
-    return BriefRun(snapshot, task_state, registry, events, projection, selection, brief)
+    return BriefRun(snapshot, task_state, registry, events, projection, selection, brief, task_selection)
 
 
 def main(argv=None):
