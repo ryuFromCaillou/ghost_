@@ -1,7 +1,8 @@
 # ARK Todoist import
 
 Python 3.11+; no dependencies. Reads only `GET /api/v1/tasks`, `/projects`,
-`/sections`, following `next_cursor` on every endpoint. No Todoist writes.
+`/sections`, following `next_cursor` on every endpoint. The importer performs no Todoist writes.
+The separate `ghost complete` command below explicitly closes PRIMARY ORDER after confirmation.
 
 Export credentials in your shell, then run:
 
@@ -644,3 +645,60 @@ its `BriefRunError.__cause__` retains the original storage/domain exception.
 The frozen `BriefRun` result exposes every pipeline stage, including the validated
 snapshot timestamp at `run.snapshot.metadata['synced_at']`. Old snapshots are
 accepted without a freshness threshold; timestamps are not added to the brief.
+
+
+## Completing PRIMARY ORDER
+
+`./ghost complete` selects the same PRIMARY ORDER as `./ghost brief`, using the
+current local snapshot, normalized tasks, registry, completion history, progress,
+objective selection, and task selection. It accepts no task title or ID. No
+primary task is an error (`GHOST ERROR`) and makes no network request.
+
+The command displays the selected task and asks:
+
+```text
+PRIMARY ORDER
+Career link
+
+Mark this task complete in Todoist? [y/N]
+```
+
+Only `y` or `yes` (case-insensitive) proceeds. Other answers, empty input, EOF,
+and an interrupted prompt print `Completion cancelled.` without writing.
+Credentials come only from the environment variable `TODOIST_API_TOKEN`; GHOST
+never sources a credential file, accepts a token argument, or persists the token.
+
+After confirmation, one authenticated `POST /api/v1/tasks/{task_id}/close` request
+is made with a 30 second timeout, no redirects, and no retries. The adapter accepts
+exactly HTTP 200 (documented) or 204 (observed from the live API) as success.
+Failures use `GHOST ERROR` without tokens or response bodies.
+On success:
+
+```text
+Completed in Todoist.
+Run `sync` to refresh GHOST state.
+```
+
+Completion writes only to Todoist. It does not alter the local snapshot,
+completion history, GoalRegistry, goals, milestones, or semantic statuses, and
+does not automatically sync. Local state does not advance until an explicit
+sync. Run the existing snapshot importer (`sync.py`) for that step:
+
+```sh
+cd ~/ghost/integrations/todoist
+# Load credentials in the shell if not already exported:
+set -a
+. ~/.config/ghost.env
+set +a
+
+./ghost brief
+# Perform PRIMARY ORDER, then confirm with y or yes:
+./ghost complete
+# Explicit sync:
+python3 ~/ghost/integrations/todoist/sync.py
+./ghost brief
+```
+
+The snapshot importer refreshes tasks, projects, and sections; it does not ingest
+completion history or infer goal/milestone completion. Until sync, a repeated
+brief or completion command still sees the stored task selection.

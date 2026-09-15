@@ -45,13 +45,13 @@ class RuntimeTests(unittest.TestCase):
         self.kwargs = dict(snapshot_path=self.snapshot, registry_path=self.goals,
                            history_path=self.history)
 
-    def cli(self):
+    def cli(self, argv=None):
         out, err = io.StringIO(), io.StringIO()
         with patch.object(paths, 'TODOIST_EXTERNAL_STATE_ROOT', self.snapshot), \
              patch.object(paths, 'GOAL_REGISTRY_PATH', self.goals), \
              patch.object(paths, 'TODOIST_HISTORY_DB_PATH', self.history), \
              redirect_stdout(out), redirect_stderr(err):
-            code = runtime.main(['brief'])
+            code = runtime.main(['brief'] if argv is None else argv)
         return code, out.getvalue(), err.getvalue()
 
     def assert_failure(self, message):
@@ -198,6 +198,11 @@ class RuntimeTests(unittest.TestCase):
                                         env=env, capture_output=True, text=True)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (0, PRIMARY + BLOCKED + QUEUED, ''))
+                result = subprocess.run(command + ['complete'], cwd=Path(__file__).resolve().parents[2],
+                                        env=env, input='n\n', capture_output=True, text=True)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (0, 'PRIMARY ORDER\nWrite methods\n\n'
+                                  'Mark this task complete in Todoist? [y/N] Completion cancelled.\n', ''))
 
 
     def test_malformed_hierarchy_error_boundary(self):
@@ -217,3 +222,90 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(run.registry.why_for_goal(run.selection.objective.goal_id).id, 'w')
         self.assertEqual(run.brief.primary.why_title, 'Keep growing')
         self.assertEqual(run.brief.primary.direction_title, 'Learning')
+
+
+    def test_completion_affirmatives_and_local_state_unchanged(self):
+        primary = runtime.run_brief(**self.kwargs).task_selection.primary
+        before = self.contents()
+        for answer in ('y', 'yes', 'Y', 'YeS'):
+            with self.subTest(answer=answer), \
+                 patch('builtins.input', return_value=answer) as prompt, \
+                 patch.dict('os.environ', {'TODOIST_API_TOKEN': 'fixture-token'}), \
+                 patch.object(runtime, 'close_task') as close, \
+                 patch('integrations.todoist.sync.sync', side_effect=AssertionError('No sync')), \
+                 patch('integrations.todoist.history.ingest_history', side_effect=AssertionError('No ingestion')):
+                code, out, err = self.cli(['complete'])
+                self.assertEqual((code, err), (0, ''))
+                self.assertEqual(out, f'PRIMARY ORDER\n{primary.title}\n\n'
+                                 'Completed in Todoist.\nRun `sync` to refresh GHOST state.\n')
+                prompt.assert_called_once_with('Mark this task complete in Todoist? [y/N] ')
+                close.assert_called_once_with('fixture-token', primary.id.source_id)
+                self.assertEqual(self.contents(), before)
+
+    def test_completion_cancellation_has_no_write(self):
+        before = self.contents()
+        for answer in ('', 'n', 'no', 'anything', 'true'):
+            with self.subTest(answer=answer), patch('builtins.input', return_value=answer), \
+                 patch.object(runtime, 'close_task') as close, \
+                 patch('integrations.todoist.todoist_write.build_opener') as network:
+                self.assertEqual(self.cli(['complete']),
+                                 (0, 'PRIMARY ORDER\nWrite methods\n\nCompletion cancelled.\n', ''))
+                close.assert_not_called()
+                network.assert_not_called()
+                self.assertEqual(self.contents(), before)
+
+    def test_completion_eof_and_interrupt_cancel(self):
+        for error in (EOFError, KeyboardInterrupt):
+            with self.subTest(error=error), patch('builtins.input', side_effect=error), \
+                 patch.object(runtime, 'close_task') as close:
+                self.assertIn('Completion cancelled.', self.cli(['complete'])[1])
+                close.assert_not_called()
+
+    def test_completion_no_primary(self):
+        save_goal_registry(GoalRegistry(), self.goals)
+        with patch.object(runtime, 'close_task') as close, patch('builtins.input') as prompt:
+            self.assertEqual(self.cli(['complete']),
+                             (1, '', 'GHOST ERROR\nNo PRIMARY ORDER to complete\n'))
+            close.assert_not_called()
+            prompt.assert_not_called()
+
+    def test_completion_error_boundary(self):
+        with patch('builtins.input', return_value='y'), \
+             patch.object(runtime, 'close_task', side_effect=runtime.TodoistWriteError('HTTP failure')):
+            code, out, err = self.cli(['complete'])
+            self.assertEqual(code, 1)
+            self.assertEqual(err, 'GHOST ERROR\nHTTP failure\n')
+            self.assertNotIn('Completed in Todoist.', out)
+        self.goals.unlink()
+        with patch.object(runtime, 'close_task') as close:
+            code, out, err = self.cli(['complete'])
+            self.assertEqual((code, out), (1, ''))
+            self.assertTrue(err.startswith('GHOST ERROR\nGoal registry not found'))
+            close.assert_not_called()
+
+    def test_completion_missing_token_before_network(self):
+        with patch.dict('os.environ', {}, clear=True), patch('builtins.input', return_value='y'), \
+             patch('integrations.todoist.todoist_write.build_opener') as network:
+            code, out, err = self.cli(['complete'])
+            self.assertEqual(code, 1)
+            self.assertIn('GHOST ERROR\nTODOIST_API_TOKEN', err)
+            network.assert_not_called()
+
+    def test_complete_dispatch_and_argument_rejection(self):
+        with patch.object(runtime, 'run_complete') as complete:
+            self.assertEqual(self.cli(['complete']), (0, '', ''))
+            complete.assert_called_once_with()
+        with patch.object(runtime, 'run_complete') as complete:
+            with self.assertRaises(SystemExit) as caught:
+                self.cli(['complete', 'foo'])
+            self.assertEqual(caught.exception.code, 2)
+            complete.assert_not_called()
+
+    def test_completion_executable_help_and_rejection(self):
+        executable = str(Path(__file__).with_name('ghost'))
+        for args, expected in [(['--help'], 0), (['complete', '--help'], 0),
+                               (['complete', 'foo'], 2)]:
+            with self.subTest(args=args):
+                result = subprocess.run([executable] + args, capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected)
+                self.assertIn('complete', result.stdout + result.stderr)
