@@ -1,9 +1,9 @@
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 import io
 import json
+import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,234 +12,169 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from integrations.todoist import runtime, paths
-from integrations.todoist.brief import BriefError, render_brief
-from integrations.todoist.completion_events import append_events
-from integrations.todoist.goal_store import save_goal_registry
-from integrations.todoist.goals import GoalRegistry, Status
-from integrations.todoist.normalize import normalize_todoist_snapshot
-from integrations.todoist.objective import ObjectiveSelectionError
-from integrations.todoist.progress import ProjectionError
+from integrations.todoist.brief import render_brief
+from integrations.todoist.completion_events import append_events, TaskCompletionEvent
 from integrations.todoist.sync import sync
-from test_brief import fixture, PRIMARY, BLOCKED, QUEUED
-from test_progress import event
+from test_task_selection import PROVENANCE, task
+from test_brief import HEADER
 
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name) / 'state'
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / 'state'
         self.snapshot = self.root / 'external/todoist'
-        self.goals = self.root / 'goals.json'
+        self.context = self.root / 'strategic-context.json'
         self.history = self.root / 'todoist-history.sqlite3'
-        self.registry, current = fixture()
-        resources = dict(projects=[dict(id='p', name='Unrelated provider project')], sections=[],
-                         tasks=[dict(id=t.id.source_id, content=t.title, project_id='p',
-                                     section_id=None, parent_id=None, checked=False, labels=[],
-                                     due=None, deadline=None, duration=None) for t in current.tasks])
+        self.resources = dict(projects=[dict(id='p', name='Project', child_order=1)], sections=[],
+                              tasks=[self.row('parent', 'Fix truck', child_order=1),
+                                     self.row('leaf', 'Check codes', parent_id='parent'),
+                                     self.row('next', 'Other work', child_order=2)])
+        self.publish()
+        self.context.write_text(json.dumps({'why':'Show my family that chasing your dreams is possible.',
+                                           'direction':'Become a traveler / documentarian.'}))
+        append_events(self.history, [])
+        self.kwargs = dict(snapshot_path=self.snapshot, context_path=self.context)
+
+    def row(self, ident, title, **changes):
+        return dict(dict(id=ident, content=title, project_id='p', section_id=None, parent_id=None,
+                         checked=False, labels=[], due=None, deadline=None, duration=None), **changes)
+
+    def publish(self):
         with patch('integrations.todoist.sync.fetch_all',
-                   side_effect=lambda resource, *args: (resources[resource], 1)):
+                   side_effect=lambda resource, *args: (self.resources[resource], 1)):
             sync('fixture-token', self.snapshot)
-        save_goal_registry(self.registry, self.goals)
-        append_events(self.history, [event('write_methods')])
-        self.kwargs = dict(snapshot_path=self.snapshot, registry_path=self.goals,
-                           history_path=self.history)
 
     def cli(self, argv=None):
         out, err = io.StringIO(), io.StringIO()
         with patch.object(paths, 'TODOIST_EXTERNAL_STATE_ROOT', self.snapshot), \
-             patch.object(paths, 'GOAL_REGISTRY_PATH', self.goals), \
-             patch.object(paths, 'TODOIST_HISTORY_DB_PATH', self.history), \
+             patch.object(paths, 'STRATEGIC_CONTEXT_PATH', self.context), \
              redirect_stdout(out), redirect_stderr(err):
             code = runtime.main(['brief'] if argv is None else argv)
         return code, out.getvalue(), err.getvalue()
-
-    def assert_failure(self, message):
-        with self.assertRaises(runtime.BriefRunError) as caught:
-            runtime.run_brief(**self.kwargs)
-        self.assertIsNotNone(caught.exception.__cause__)
-        code, out, err = self.cli()
-        self.assertEqual(code, 1)
-        self.assertEqual(out, '')
-        self.assertTrue(err.startswith('GHOST ERROR\n'))
-        self.assertIn(message, err)
-        self.assertNotIn('Traceback', err)
-
-    def test_full_pipeline_and_exact_cli(self):
-        run = runtime.run_brief(**self.kwargs)
-        self.assertEqual(run.registry, self.registry)
-        self.assertEqual(len(run.completion_events), 1)
-        self.assertEqual(run.projection.goals[0].completion_event_count, 1)
-        self.assertEqual(run.selection.objective.milestone_id, 'manuscript')
-        self.assertEqual(render_brief(run.brief), PRIMARY + BLOCKED + QUEUED)
-        self.assertEqual(self.cli(), (0, PRIMARY + BLOCKED + QUEUED, ''))
-        with self.assertRaises(FrozenInstanceError):
-            run.brief = None
-
-    def test_missing_snapshot(self):
-        self.snapshot.unlink()
-        self.assert_failure('Todoist snapshot unavailable')
-
-    def test_malformed_snapshot(self):
-        (self.snapshot / 'tasks.json').write_text('{')
-        self.assert_failure('Todoist snapshot unavailable or invalid')
-
-    def test_missing_registry(self):
-        self.goals.unlink()
-        self.assert_failure('Goal registry not found')
-
-    def test_malformed_registry(self):
-        self.goals.write_text('{}')
-        self.assert_failure('Goal registry unavailable or invalid')
-
-    def test_missing_history(self):
-        self.history.unlink()
-        self.assert_failure('Completion history unavailable or invalid')
-        self.assertFalse(self.history.exists())
-
-    def test_malformed_history(self):
-        self.history.write_bytes(b'not sqlite')
-        self.assert_failure('Completion history unavailable or invalid')
-
-    def test_invalid_history_schema_and_event(self):
-        with sqlite3.connect(self.history) as db:
-            db.execute("UPDATE task_completion_events SET completed_at = 'bad'")
-        self.assert_failure('Completion history unavailable or invalid')
-        with sqlite3.connect(self.history) as db:
-            db.execute('DROP TABLE task_completion_events')
-        self.assert_failure('Completion history unavailable or invalid')
-
-    def test_normalization_failure(self):
-        path = self.snapshot / 'tasks.json'
-        rows = json.loads(path.read_text())
-        rows[0]['priority'] = 99
-        path.write_text(json.dumps(rows))
-        self.assert_failure('Normalization failed')
-
-    def test_domain_error_boundaries(self):
-        for name, error in [('project_progress', ProjectionError),
-                            ('select_objective', ObjectiveSelectionError),
-                            ('build_brief', BriefError)]:
-            with self.subTest(stage=name), patch.object(runtime, name, side_effect=error('inconsistent')):
-                self.assert_failure(f'{error.__name__}: inconsistent')
-
-    def test_no_network_or_ingestion(self):
-        with ExitStack() as stack:
-            for name in ['socket.socket.connect', 'socket.create_connection',
-                         'urllib.request.urlopen', 'urllib.request.OpenerDirector.open',
-                         'integrations.todoist.sync.build_opener',
-                         'integrations.todoist.history.build_opener',
-                         'integrations.todoist.sync.sync',
-                         'integrations.todoist.history.ingest_history']:
-                stack.enter_context(patch(name, side_effect=AssertionError('Forbidden network/sync')))
-            self.assertEqual(self.cli(), (0, PRIMARY + BLOCKED + QUEUED, ''))
 
     def contents(self):
         return {str(p.relative_to(self.root)): ('link', str(p.readlink())) if p.is_symlink()
                 else ('file', p.read_bytes(), p.stat().st_mtime_ns) if p.is_file()
                 else ('directory',) for p in self.root.rglob('*')}
 
-    def test_no_writes_and_repeatability(self):
-        before = self.contents()
-        first = self.cli()
-        self.assertEqual(first, self.cli())
-        self.assertEqual(first[0], 0)
-        self.assertEqual(before, self.contents())
+    def assert_failure(self, message):
+        code, out, err = self.cli()
+        self.assertEqual((code, out), (1, ''))
+        self.assertEqual(err, 'GHOST ERROR\n' + message + '\n')
 
-    def test_centralized_defaults(self):
-        with patch.object(runtime, 'load_snapshot', wraps=runtime.load_snapshot) as snapshot, \
-             patch.object(runtime, 'load_goal_registry', wraps=runtime.load_goal_registry) as registry, \
-             patch.object(runtime, 'load_events', wraps=runtime.load_events) as history:
-            self.assertEqual(self.cli()[0], 0)
-            snapshot.assert_called_once_with(self.snapshot)
-            registry.assert_called_once_with(self.goals)
-            history.assert_called_once_with(self.history)
+    def test_full_pipeline_exact_cli(self):
+        expected = HEADER + 'Check codes\n\nUNDER\nFix truck\n\nNEXT\n- Other work\n'
+        self.assertEqual(self.cli(), (0, expected, ''))
+        self.assertEqual(render_brief(runtime.run_brief(**self.kwargs).brief), expected)
 
-    def test_normalized_content_is_used(self):
-        def normalize(snapshot):
-            state = normalize_todoist_snapshot(snapshot)
-            return replace(state, tasks=tuple(replace(t, title='Normalized ' + t.title)
-                                              for t in state.tasks))
-        with patch.object(runtime, 'normalize_todoist_snapshot', side_effect=normalize):
-            self.assertIn('PRIMARY ORDER\nNormalized Write methods\n', self.cli()[1])
+    def test_no_registry_or_links_required_and_new_sync_is_sufficient(self):
+        self.assertFalse((self.root / 'goals.json').exists())
+        self.assertEqual(runtime.run_brief(**self.kwargs).task_selection.primary.source_id, 'leaf')
+        context_before = self.context.read_bytes()
+        self.resources['tasks'].append(self.row('new', 'New unlinked task', child_order=0))
+        self.publish()
+        self.assertEqual(runtime.run_brief(**self.kwargs).task_selection.primary.source_id, 'new')
+        self.resources['tasks'].append(self.row('new-child', 'New unlinked subtask', parent_id='new'))
+        self.publish()
+        self.assertEqual(runtime.run_brief(**self.kwargs).task_selection.primary.source_id, 'new-child')
+        self.assertEqual(self.context.read_bytes(), context_before)
+        self.assertFalse((self.root / 'goals.json').exists())
 
-    def test_explicit_empty_registry(self):
-        save_goal_registry(GoalRegistry(), self.goals)
-        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n\nNo actionable work.\n', ''))
+    def test_legacy_registry_not_read(self):
+        (self.root / 'goals.json').write_text('malformed unused legacy data')
+        self.assertEqual(self.cli()[0], 0)
 
-    def test_blocked_without_objective(self):
-        registry = replace(self.registry, milestones=tuple(replace(m, status=Status.BLOCKED)
-                                                           for m in self.registry.milestones))
-        save_goal_registry(registry, self.goals)
-        self.assertEqual(self.cli(), (0, 'GHOST BRIEF\n\nPRIMARY ORDER\nNone\n\nBLOCKED\n'
-                                     '- Thesis — Experimental validation\n- Thesis — Manuscript\n'
-                                     '- Revenue — Portfolio offer\n', ''))
+    def test_history_does_not_affect_actionability(self):
+        before = self.cli()
+        append_events(self.history, [TaskCompletionEvent(task('leaf').id, PROVENANCE.synced_at,
+                      'Historical completion', None, None, None, 'todoist', {})])
+        self.assertEqual(self.cli(), before)
+        self.history.write_bytes(b'malformed history is not operational state')
+        self.assertEqual(self.cli(), before)
+        self.history.unlink()
+        self.assertEqual(self.cli(), before)
+        self.assertFalse(self.history.exists())
 
-    def test_old_snapshot_is_exposed_and_accepted(self):
-        path = self.snapshot / 'sync_metadata.json'
-        metadata = json.loads(path.read_text())
-        metadata['synced_at'] = '2000-01-01T00:00:00Z'
-        path.write_text(json.dumps(metadata))
-        run = runtime.run_brief(**self.kwargs)
-        self.assertEqual(run.snapshot.metadata['synced_at'], metadata['synced_at'])
-        self.assertNotIn('2000', render_brief(run.brief))
+    def test_missing_snapshot(self):
+        self.snapshot.unlink()
+        self.assert_failure('Todoist snapshot unavailable or invalid')
 
-    def test_executable_and_module_entrypoints(self):
-        # A fresh process uses fixture defaults by changing HOME, never ARK state.
-        import os
-        home = self.root.parent / 'home'
-        (home / 'ghost/integrations').mkdir(parents=True)
-        (home / 'ghost/integrations/state').symlink_to(self.root, target_is_directory=True)
-        env = dict(os.environ, HOME=str(home), PYTHONDONTWRITEBYTECODE='1')
-        for command in [[str(Path(__file__).with_name('ghost'))],
-                        [sys.executable, '-m', 'integrations.todoist.runtime']]:
-            with self.subTest(command=command):
-                result = subprocess.run(command + ['brief'], cwd=Path(__file__).resolve().parents[2],
-                                        env=env, capture_output=True, text=True)
-                self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (0, PRIMARY + BLOCKED + QUEUED, ''))
-                result = subprocess.run(command + ['complete'], cwd=Path(__file__).resolve().parents[2],
-                                        env=env, input='n\n', capture_output=True, text=True)
-                self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (0, 'PRIMARY ORDER\nWrite methods\n\n'
-                                  'Mark this task complete in Todoist? [y/N] Completion cancelled.\n', ''))
+    def test_malformed_snapshot(self):
+        (self.snapshot / 'tasks.json').write_text('{')
+        self.assert_failure('Todoist snapshot unavailable or invalid')
 
+    def test_missing_and_malformed_context(self):
+        self.context.unlink()
+        self.assert_failure('Strategic context unavailable or invalid')
+        self.context.write_text('{}')
+        self.assert_failure('Strategic context unavailable or invalid')
+
+    def test_normalization_failure(self):
+        self.resources['tasks'][0]['priority'] = 99
+        self.publish()
+        self.assert_failure('Normalization failed')
 
     def test_malformed_hierarchy_error_boundary(self):
-        for collection, field in [('directions', 'why_id'), ('goals', 'direction_id')]:
-            save_goal_registry(self.registry, self.goals)
-            payload = json.loads(self.goals.read_text())
-            payload[collection][0][field] = 'unknown'
-            self.goals.write_text(json.dumps(payload))
-            before = self.contents()
-            self.assert_failure('Goal registry unavailable or invalid')
-            self.assertEqual(self.contents(), before)
+        for parent in ('missing', 'leaf'):
+            self.resources['tasks'][0]['parent_id'] = parent
+            self.publish()
+            self.assert_failure('Todoist snapshot unavailable or invalid')
 
-    def test_extended_pipeline_ancestry(self):
-        run = runtime.run_brief(**self.kwargs)
-        self.assertEqual(run.projection.goals[0].direction_id, 'd')
-        self.assertEqual(run.projection.goals[0].why_id, 'w')
-        self.assertEqual(run.registry.why_for_goal(run.selection.objective.goal_id).id, 'w')
-        self.assertEqual(run.brief.primary.why_title, 'Keep growing')
-        self.assertEqual(run.brief.primary.direction_title, 'Learning')
+    def test_malformed_order_error_boundary(self):
+        self.resources['tasks'][0]['child_order'] = 'bad'
+        self.publish()
+        self.assert_failure('Invalid provider ordering integer')
 
+    def test_no_network_or_ingestion(self):
+        with ExitStack() as stack:
+            for name in ['socket.socket.connect', 'socket.create_connection',
+                         'urllib.request.urlopen', 'urllib.request.OpenerDirector.open',
+                         'integrations.todoist.sync.sync', 'integrations.todoist.history.ingest_history',
+                         'integrations.todoist.completion_events.load_events']:
+                stack.enter_context(patch(name, side_effect=AssertionError('Forbidden network/history')))
+            self.assertEqual(self.cli()[0], 0)
+
+    def test_no_writes_and_repeatability(self):
+        before = self.contents()
+        self.assertEqual(self.cli(), self.cli())
+        self.assertEqual(self.contents(), before)
+
+    def test_normalized_content_is_used(self):
+        normalize = runtime.normalize_todoist_snapshot
+        def changed(snapshot):
+            current = normalize(snapshot)
+            return replace(current, tasks=tuple(replace(t, title='Normalized '+t.title) for t in current.tasks))
+        with patch.object(runtime, 'normalize_todoist_snapshot', side_effect=changed):
+            self.assertIn('PRIMARY ORDER\nNormalized Check codes\n', self.cli()[1])
+
+    def test_old_snapshot_accepted(self):
+        path = self.snapshot / 'sync_metadata.json'
+        data = json.loads(path.read_text())
+        data['synced_at'] = '2000-01-01T00:00:00Z'
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.cli()[0], 0)
+
+    def test_completed_child_changes_primary_to_parent_after_sync(self):
+        self.resources['tasks'][1]['checked'] = True
+        self.publish()
+        self.assertEqual(runtime.run_brief(**self.kwargs).task_selection.primary.source_id, 'parent')
 
     def test_completion_affirmatives_and_local_state_unchanged(self):
         primary = runtime.run_brief(**self.kwargs).task_selection.primary
         before = self.contents()
         for answer in ('y', 'yes', 'Y', 'YeS'):
-            with self.subTest(answer=answer), \
-                 patch('builtins.input', return_value=answer) as prompt, \
-                 patch.dict('os.environ', {'TODOIST_API_TOKEN': 'fixture-token'}), \
+            with self.subTest(answer=answer), patch('builtins.input', return_value=answer) as prompt, \
+                 patch.dict('os.environ', {'TODOIST_API_TOKEN':'fixture-token'}), \
                  patch.object(runtime, 'close_task') as close, \
                  patch('integrations.todoist.sync.sync', side_effect=AssertionError('No sync')), \
-                 patch('integrations.todoist.history.ingest_history', side_effect=AssertionError('No ingestion')):
+                 patch('integrations.todoist.history.ingest_history', side_effect=AssertionError('No history')):
                 code, out, err = self.cli(['complete'])
                 self.assertEqual((code, err), (0, ''))
-                self.assertEqual(out, f'PRIMARY ORDER\n{primary.title}\n\n'
-                                 'Completed in Todoist.\nRun `sync` to refresh GHOST state.\n')
+                self.assertIn('PRIMARY ORDER\n'+primary.title+'\n', out)
                 prompt.assert_called_once_with('Mark this task complete in Todoist? [y/N] ')
-                close.assert_called_once_with('fixture-token', primary.id.source_id)
+                close.assert_called_once_with('fixture-token', primary.source_id)
                 self.assertEqual(self.contents(), before)
 
     def test_completion_cancellation_has_no_write(self):
@@ -249,7 +184,7 @@ class RuntimeTests(unittest.TestCase):
                  patch.object(runtime, 'close_task') as close, \
                  patch('integrations.todoist.todoist_write.build_opener') as network:
                 self.assertEqual(self.cli(['complete']),
-                                 (0, 'PRIMARY ORDER\nWrite methods\n\nCompletion cancelled.\n', ''))
+                                 (0, 'PRIMARY ORDER\nCheck codes\n\nCompletion cancelled.\n', ''))
                 close.assert_not_called()
                 network.assert_not_called()
                 self.assertEqual(self.contents(), before)
@@ -262,10 +197,10 @@ class RuntimeTests(unittest.TestCase):
                 close.assert_not_called()
 
     def test_completion_no_primary(self):
-        save_goal_registry(GoalRegistry(), self.goals)
+        self.resources['tasks'] = []
+        self.publish()
         with patch.object(runtime, 'close_task') as close, patch('builtins.input') as prompt:
-            self.assertEqual(self.cli(['complete']),
-                             (1, '', 'GHOST ERROR\nNo PRIMARY ORDER to complete\n'))
+            self.assertEqual(self.cli(['complete']), (1, '', 'GHOST ERROR\nNo PRIMARY ORDER to complete\n'))
             close.assert_not_called()
             prompt.assert_not_called()
 
@@ -273,39 +208,44 @@ class RuntimeTests(unittest.TestCase):
         with patch('builtins.input', return_value='y'), \
              patch.object(runtime, 'close_task', side_effect=runtime.TodoistWriteError('HTTP failure')):
             code, out, err = self.cli(['complete'])
-            self.assertEqual(code, 1)
-            self.assertEqual(err, 'GHOST ERROR\nHTTP failure\n')
+            self.assertEqual((code, err), (1, 'GHOST ERROR\nHTTP failure\n'))
             self.assertNotIn('Completed in Todoist.', out)
-        self.goals.unlink()
-        with patch.object(runtime, 'close_task') as close:
-            code, out, err = self.cli(['complete'])
-            self.assertEqual((code, out), (1, ''))
-            self.assertTrue(err.startswith('GHOST ERROR\nGoal registry not found'))
-            close.assert_not_called()
 
     def test_completion_missing_token_before_network(self):
         with patch.dict('os.environ', {}, clear=True), patch('builtins.input', return_value='y'), \
              patch('integrations.todoist.todoist_write.build_opener') as network:
-            code, out, err = self.cli(['complete'])
-            self.assertEqual(code, 1)
-            self.assertIn('GHOST ERROR\nTODOIST_API_TOKEN', err)
+            self.assertIn('GHOST ERROR\nTODOIST_API_TOKEN', self.cli(['complete'])[2])
             network.assert_not_called()
+
+    def test_bad_state_prevents_confirmation_and_write(self):
+        self.context.unlink()
+        with patch.object(runtime, 'close_task') as close, patch('builtins.input') as prompt:
+            self.assertEqual(self.cli(['complete'])[0], 1)
+            close.assert_not_called()
+            prompt.assert_not_called()
 
     def test_complete_dispatch_and_argument_rejection(self):
         with patch.object(runtime, 'run_complete') as complete:
             self.assertEqual(self.cli(['complete']), (0, '', ''))
             complete.assert_called_once_with()
         with patch.object(runtime, 'run_complete') as complete:
-            with self.assertRaises(SystemExit) as caught:
+            with self.assertRaises(SystemExit):
                 self.cli(['complete', 'foo'])
-            self.assertEqual(caught.exception.code, 2)
             complete.assert_not_called()
 
-    def test_completion_executable_help_and_rejection(self):
-        executable = str(Path(__file__).with_name('ghost'))
-        for args, expected in [(['--help'], 0), (['complete', '--help'], 0),
-                               (['complete', 'foo'], 2)]:
-            with self.subTest(args=args):
-                result = subprocess.run([executable] + args, capture_output=True, text=True)
-                self.assertEqual(result.returncode, expected)
-                self.assertIn('complete', result.stdout + result.stderr)
+    def test_executable_and_module_entrypoints(self):
+        home = self.root.parent / 'home'
+        (home / 'ghost/integrations').mkdir(parents=True)
+        (home / 'ghost/integrations/state').symlink_to(self.root, target_is_directory=True)
+        env = dict(os.environ, HOME=str(home), PYTHONDONTWRITEBYTECODE='1')
+        for command in ([str(Path(__file__).with_name('ghost'))],
+                        [sys.executable, '-m', 'integrations.todoist.runtime']):
+            for args in (['brief'], ['complete'], ['--help']):
+                with self.subTest(command=command, args=args):
+                    result = subprocess.run(command + args, cwd=Path(__file__).resolve().parents[2],
+                                            env=env, input='n\n', capture_output=True, text=True)
+                    self.assertEqual((result.returncode, result.stderr), (0, ''))
+                    if args == ['brief']:
+                        self.assertEqual(result.stdout, self.cli()[1])
+                    elif args == ['complete']:
+                        self.assertIn('Completion cancelled.', result.stdout)

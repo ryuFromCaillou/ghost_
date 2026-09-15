@@ -48,6 +48,12 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(state.provenance.generation, str(self.snapshot.directory))
         self.assertEqual(state.provenance.synced_at, datetime.fromisoformat(self.snapshot.metadata['synced_at']))
 
+    def test_ordering_metadata_preserved_in_raw(self):
+        snapshot = self.modified(order_key='a1V', child_order=7, day_order=-1)
+        raw = normalize_todoist_snapshot(snapshot).tasks[0].raw
+        self.assertEqual({key: raw[key] for key in ('order_key', 'child_order', 'day_order')},
+                         {'order_key': 'a1V', 'child_order': 7, 'day_order': -1})
+
     def test_identity_preservation(self):
         task = normalize_todoist_snapshot(self.snapshot).tasks[0]
         self.assertEqual(task.id, SourceIdentity('todoist', 'A-parent'))

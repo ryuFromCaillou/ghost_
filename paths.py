@@ -5,5 +5,5 @@ from typing import Final
 INTEGRATIONS_ROOT: Final[Path] = Path.home() / 'ghost/integrations'
 STATE_ROOT: Final[Path] = INTEGRATIONS_ROOT / 'state'
 TODOIST_EXTERNAL_STATE_ROOT: Final[Path] = STATE_ROOT / 'external/todoist'
-GOAL_REGISTRY_PATH: Final[Path] = STATE_ROOT / 'goals.json'
+STRATEGIC_CONTEXT_PATH: Final[Path] = STATE_ROOT / 'strategic-context.json'
 TODOIST_HISTORY_DB_PATH: Final[Path] = STATE_ROOT / 'todoist-history.sqlite3'

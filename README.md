@@ -1,4 +1,204 @@
-# ARK Todoist import
+# GHOST: context and Todoist task trees
+
+```text
+WHY / DIRECTION
+        ↓
+Todoist task tree
+        ↓
+actionable frontier
+        ↓
+deterministic selection
+        ↓
+PRIMARY ORDER
+        ↓
+operator/Codex
+        ↓
+ghost complete
+        ↓
+Todoist
+        ↓
+sync
+        ↓
+next order
+```
+
+Todoist owns operational task hierarchy. ARK/GHOST does not duplicate or persist
+another task tree. WHY and DIRECTION govern the work but have no status, task
+links, scheduling rank, or eligibility rules. A normal Todoist task/subtask enters
+GHOST's current work universe after sync; no registry edit is required.
+
+Parent/child means **containment, not dependency**. GHOST neither infers prerequisite
+relationships nor completes parents when children complete.
+
+## Current-state pipeline
+
+`runtime.run_brief()` reads one published snapshot, normalizes it, loads strategic
+context, calls the pure `select_task()` once, and builds a brief. `ghost complete`
+calls the same pipeline. For the same stored inputs, both commands select the
+same PRIMARY. Brief performs no network requests, synchronization, database
+access, or filesystem writes. Stale snapshots remain accepted: refresh explicitly.
+
+Provider-independent immutable models remain in `integrations/task_state.py`.
+Normalization preserves `SourceIdentity('todoist', original_id)`, `parent_id`,
+ACTIVE/COMPLETED status, project/section context, dates and provenance. Original
+task objects remain in immutable `task.raw`; original project/section attributes
+remain in the immutable snapshot. No provider identity is synthesized or remapped.
+
+### Exact actionability rule
+
+A task is actionable precisely when it is present in current normalized state,
+is ACTIVE, and has **no direct ACTIVE child**. Completed and missing tasks are
+never actionable. An ACTIVE parent with only completed children is actionable.
+An active child of a completed parent is still actionable. In the unusual chain
+ACTIVE parent → COMPLETED child → ACTIVE grandchild, both parent and grandchild
+are actionable: the rule concerns direct children, not inferred dependencies.
+
+The reader rejects missing parents, cycles, and cross-project parent references.
+The selector also rejects these for directly supplied normalized state; it never
+repairs a malformed hierarchy. Completion history cannot make a task actionable
+or ineligible. The current snapshot alone supplies task completion status.
+
+### Exact deterministic ordering contract
+
+The current snapshot contains task `order_key`, `child_order`, and `day_order`.
+Task ordering fields survive normalization in `task.raw`. Project `order_key` /
+`child_order` and section `order_key` / `section_order` remain in snapshot rows;
+runtime passes these rows to the selector without changing the normalized models.
+
+1. Order represented projects as a flat list. Within each project, visit
+   unsectioned root tasks first, then sections in provider order.
+2. Within each sibling scope (same project, section, and parent), order tasks by
+   provider order. Traverse the forest depth first, visiting parents before their
+   descendants. Child groups use the same project/section grouping if needed.
+3. Filter this traversal to the actionable rule above. PRIMARY is the first item
+   or none; NEXT is every remaining currently actionable task, across all roots.
+
+For each project list, section list, or task sibling group: if **every member** has
+an `order_key`, compare these strings lexicographically. Otherwise use ascending
+legacy integers for the entire group (`child_order` for projects/tasks,
+`section_order` for sections), with missing/null positions last. Break equal or
+missing positions using `(provider, provider_id)` lexicographically. Invalid
+non-null ordering types fail through `GHOST ERROR`; no positions are invented.
+Only projects/sections represented by current tasks participate in these groups.
+
+Input array order, task titles, semantic context, completion history, priority,
+due dates, and `day_order` do not rank work. This contract approximates Todoist's
+manual project list order, not Today, filters, custom sorts, or workspace folders.
+Projects are flattened because the normalized project model has no parent or
+folder structure. Fractional project keys across different project-parent scopes
+are compared as a deterministic fallback, not a claim to reproduce that UI.
+The [Todoist API reference](https://developer.todoist.com/api/v1/) documents
+lexicographic `order_key` sorting within sibling scopes.
+
+### Brief shape
+
+```text
+GHOST BRIEF
+
+WHY
+Show my family that chasing your dreams is possible.
+
+DIRECTION
+Become a traveler / documentarian.
+
+PRIMARY ORDER
+Check codes
+
+UNDER
+Fix truck
+Diagnose misfire
+
+NEXT
+- Inspect cylinders
+- Acquire prices
+```
+
+UNDER lists the complete ancestor chain from root to immediate parent; top-level
+PRIMARY omits it. NEXT means **remaining currently actionable frontier**, not
+linked work under a milestone. Empty frontiers retain WHY/DIRECTION, print PRIMARY
+ORDER `None`, and `No actionable work.` Empty NEXT is omitted.
+
+## Strategic persistence and migration
+
+Shared durable files live under `~/ghost/integrations/state/`:
+
+- `strategic-context.json`: exactly two nonempty strings, `why` and `direction`.
+- `goals.json`: preserved legacy archive, ignored by runtime.
+- `todoist-history.sqlite3`: unchanged raw completion evidence.
+- `external/todoist`: current published snapshot symlink; older generations remain
+  under `external/.todoist-snapshots/`.
+
+```json
+{
+  "why": "Show my family that chasing your dreams is possible.",
+  "direction": "Become a traveler / documentarian."
+}
+```
+
+The one-shot migration is explicit, separate from brief/complete:
+
+```sh
+cd ~/ghost/integrations/todoist
+python3 -B migrate_context.py
+```
+
+It extracts the sole WHY and its sole linked DIRECTION from `goals.json`, refusing
+ambiguous or malformed input. It atomically publishes the new context file without
+overwriting an existing destination. An identical destination allows harmless
+reruns; a conflicting one fails. `--source` and `--destination` support explicit
+paths. The original registry stays byte-for-byte at its original path as the
+deterministic archive; no legacy statuses, descriptions, IDs, or links are deleted
+from that archive. Only the two titles move into active strategic context.
+
+Runtime requires the small context file and current snapshot. It never migrates
+implicitly or falls back to the old registry. Goal, Milestone, TaskMilestoneLink,
+progress projection, and milestone objective selection code have been removed.
+Shared defaults remain centralized in `paths.py`; explicit Python snapshot and
+context path arguments remain available.
+
+## Commands and completion safety
+
+```sh
+cd ~/ghost/integrations/todoist
+./ghost --help
+./ghost brief
+./ghost complete
+# After remote completion, explicitly refresh:
+python3 sync.py
+./ghost brief
+```
+
+`ghost complete` displays the current selected task and asks
+`Mark this task complete in Todoist? [y/N] `. Only `y` or `yes` (case insensitive,
+surrounding whitespace ignored) proceeds. Other input, EOF, or interrupt cancels
+without a write. Missing PRIMARY fails before prompting.
+
+After confirmation, the unchanged adapter sends exactly one authenticated
+`POST https://api.todoist.com/api/v1/tasks/{task_id}/close`, with a 30-second
+timeout, redirect refusal, no retries, and exactly HTTP 200/204 accepted.
+This status handling does not independently verify resulting remote task state.
+Credentials come only from `TODOIST_API_TOKEN` in the environment; commands do not
+source credential files or print tokens or remote response bodies. Failures use
+the concise `GHOST ERROR` boundary. No automatic sync, local task completion,
+parent completion, history append, or strategic-context mutation occurs.
+
+## Validation
+
+```sh
+cd ~/ghost/integrations/todoist
+python3 -m unittest -v
+git diff --check
+./ghost --help
+./ghost brief
+```
+
+Tests cover tree validation, direct-child actionability, deterministic provider
+ordering and ties, exact rendering, one-shot migration, selection without links,
+new tasks/subtasks entering after mocked sync, and confirmation/cancellation.
+Completion writes are mocked. Importer, reader, normalization, history ingestion,
+and write-adapter regression tests remain separate. No test performs a live write.
+
+## Todoist import
 
 Python 3.11+; no dependencies. Reads only `GET /api/v1/tasks`, `/projects`,
 `/sections`, following `next_cursor` on every endpoint. The importer performs no Todoist writes.
@@ -53,41 +253,6 @@ python3 -m unittest -v
 
 API reference: https://developer.todoist.com/api/v1/
 
-## Shared state paths
-
-`~/ghost/integrations/state/` holds shared durable orchestration state;
-`~/ghost/integrations/todoist/` holds the Todoist adapter/integration code.
-Todoist does not own `goals.json`. Future integrations may consume or contribute
-to shared state, and `integrations/` may later become the orchestration/API layer.
-This is the current intent, not a finalized architecture.
-
-```text
-~/ghost/integrations/
-├── state/
-│   ├── goals.json
-│   ├── todoist-history.sqlite3
-│   └── external/
-│       ├── .todoist.lock
-│       ├── .todoist-snapshots/       # retained generations
-│       └── todoist/                 # symlink to a published generation
-│           ├── tasks.json
-│           ├── projects.json
-│           ├── sections.json
-│           └── sync_metadata.json
-└── todoist/                         # adapter code, including paths.py
-```
-
-The pure `paths.py` module centralizes defaults, using the user's home directory
-at import time. Importing it creates no directories or files. Goal persistence
-uses `goal_store.DEFAULT_PATH`; snapshot publishing and reading share
-`DEFAULT_OUTPUT`; completion ingestion uses `history.DEFAULT_HISTORY`.
-Explicit Python path arguments and history's `--database` override still apply.
-From the adapter directory, `python3 -m goal_store` inspects the default registry.
-
-These defaults replace the former `~/ghost/state/` locations. Existing state is
-left untouched: there is no migration, copying, deletion, compatibility symlink,
-or fallback read from the old locations. No database contents or schema change.
-
 ## Snapshot reader
 
 `reader.load_snapshot(current=DEFAULT_OUTPUT)` returns a frozen
@@ -141,95 +306,6 @@ cover normal loading, a publication switch between file reads with exactly one
 resolution, missing/malformed files, broken references/cycles, invalid schemas
 and metadata, missing/dangling/looping current links, linked inputs, disappearing
 files, no network or filesystem mutations, and deep in-memory immutability.
-
-## GHOST task normalization
-
-No canonical task model exists in `entry/ghost`; its current state service exposes
-telemetry. Provider-independent frozen models now live in
-`integrations/task_state.py`, outside the Todoist adapter and independent of the
-existing runtime. No runtime wiring or persistence is added.
-
-From `~/ghost`:
-
-```python
-from integrations.todoist.reader import load_snapshot
-from integrations.todoist.normalize import normalize_todoist_snapshot
-
-state = normalize_todoist_snapshot(load_snapshot())
-by_id = {task.id: task for task in state.tasks}
-for task in state.tasks:
-    print(task.title, task.project.name if task.project else None, task.status.value)
-    parent = by_id.get(task.parent_id)
-```
-
-For a compact local read → normalize → inspect command:
-
-```sh
-cd ~/ghost
-python3 -m integrations.todoist.normalize
-# Include normalized task details (may contain personal content):
-python3 -m integrations.todoist.normalize --show-tasks
-```
-
-`normalize_todoist_snapshot(snapshot) -> GhostTaskState` is a pure conversion of
-one reader-validated `TodoistSnapshot`. It performs no filesystem or network IO,
-does not re-read current, and does not repair hierarchy. Conversion failures
-raise `NormalizationError`. Input sequence order is preserved; parents are
-references, never recursively embedded objects. Returned objects, nested raw
-mappings, and sequences are immutable. Repeated normalization produces equal
-state with no newly generated IDs or timestamps.
-
-Mapping contract:
-
-| Source | GHOST field / semantics |
-| --- | --- |
-| `id` | `task.id = SourceIdentity('todoist', original_id)`; `source` and `source_id` convenience properties |
-| `content`, `description` | `title`, `description`; strings unchanged |
-| `project_id` | `project` with provider-aware ID and resolved name |
-| `section_id` | `section` with provider-aware ID, resolved name, and project identity |
-| `parent_id` | Provider-aware `parent_id`, equal to the parent's `task.id` |
-| `labels` | `tags` tuple; absent/null is `None`, supplied empty array is `()` |
-| `priority` | 1 → normal, 2 → medium, 3 → high, 4 → urgent; missing/null → `None` |
-| `checked` | false → active, true → completed |
-| `due`, `deadline` | Separate `TaskDate` objects; absent/null → `None` |
-| `added_at`, `updated_at` | `created_at`, `updated_at` parsed datetimes; absent/null → `None` |
-| Snapshot directory, `synced_at` | Shared immutable provenance on state and every task: source, absolute generation, snapshot timestamp |
-| Full original task | Explicit deeply immutable `raw` extension for source-specific inspection |
-
-`TaskDate.value` is a Python `date` for date-only input and a `datetime` for timed
-input. An explicit `datetime` field takes precedence over `date`; API v1 also
-encodes timed values directly in `date`. Naive/floating times remain naive;
-offsets are preserved and named timezone strings are retained separately.
-Nothing is converted to midnight or to the machine timezone. Recurrence maps
-to `recurring`, the source expression to `expression`, and its language to
-`language`; no recurrence schedule is computed. Missing metadata stays `None`.
-The original date object remains available through the task's `raw` extension.
-
-Priority mapping follows the API's **task object** definition (1 natural,
-4 very urgent), not the conflicting write-parameter prose saying 1 highest:
-https://developer.todoist.com/api/v1/#tag/Tasks . The mapping does not assign or
-change priorities. Verify that discrepancy before any future write-back or
-priority-driven execution; original numbers remain available in `raw`.
-
-Source-specific fields intentionally left in `raw` include duration, ordering
-keys/positions, assignment/user IDs, completion timestamps/counters, collapse
-flags and other UI/API metadata. Unmapped project/section attributes remain in
-the immutable source snapshot; normalized context includes identity and names.
-Downstream ordinary task logic should use normalized fields, not `raw`.
-
-The normalizer tolerates missing optional task fields on an already materialized
-snapshot; this does not relax the existing file reader's stricter input contract
-(e.g. the reader still requires labels and nullable hierarchy keys). Identity
-is provider-aware within each resource collection; multiple accounts of the
-same provider are not introduced in this phase.
-
-Validation on the current local generation: 23 tasks, 2 projects, 5 sections,
-4 resolvable children. No current tasks have due dates, so date-only, fixed and
-floating datetimes, deadlines, and recurring metadata are covered by fixtures.
-`python3 -m unittest -v` from this directory includes normalization,
-reader, and importer tests. Tests include provider-aware
-identity, context resolution, child-before-parent ordering, optional values,
-status/priority mapping, provenance, source immutability and determinism.
 
 ## Durable completion history
 
@@ -297,408 +373,3 @@ The endpoint returns `items` and `next_cursor`, with completion-date ranges of u
 to three months. No live account import is part of the automated validation.
 Run `python3 -m unittest -v` from this directory to test both pipelines, including
 history persistence after a task disappears from a subsequently published snapshot.
-
-## Semantic hierarchy
-
-| Layer | Meaning |
-| --- | --- |
-| WHY | Governing reason / principle |
-| DIRECTION | Long-horizon orientation |
-| GOAL | Strategic state/program |
-| MILESTONE | Meaningful state checkpoint |
-| OBJECTIVE | Runtime-selected bounded target |
-| TASK | Executable provider-owned action |
-
-Example (illustrative only; no user registry is seeded):
-
-- Why: Show my family that chasing your dreams is possible.
-- Direction: Become a traveler / documentarian.
-- Goal: Financial independence.
-- Milestone: First repeatable $1,000/month income stream established.
-- Objective: Publish and pitch one concrete service this week.
-- Task: Build service landing page.
-
-`Why` and `Direction` are frozen descriptive records without Status. A Direction
-may reference zero or one Why. Every Goal must reference exactly one Direction;
-every Milestone references one Goal. Only Goal and Milestone have explicit Status.
-Task evidence never completes a Direction or Why, and neither has task links.
-The example's objective wording does not introduce a scheduling policy or change
-the selector's existing milestone summary.
-
-Objective is **not persisted in GoalRegistry**: `objective.py` derives it at runtime.
-Task remains provider-owned; `TaskMilestoneLink` attaches its provider identity to
-at most one milestone. Completion history remains separate immutable evidence.
-
-The JSON registry requires exactly these five top-level collections (shown with
-illustrative records to specify the saved fields):
-
-```json
-{
-  "whys": [{"id": "w", "title": "Reason", "description": null}],
-  "directions": [{"id": "d", "title": "Orientation", "description": null, "why_id": "w"}],
-  "goals": [{"id": "g", "title": "Program", "description": null, "direction_id": "d", "status": "planned"}],
-  "milestones": [{"id": "m", "goal_id": "g", "title": "Checkpoint", "description": null, "status": "planned"}],
-  "task_links": [{"task_source": "todoist", "task_source_id": "t", "milestone_id": "m"}]
-}
-```
-
-Collections may be empty; `Direction.why_id` may be null. The writer preserves
-collection order and uses deterministic sorted JSON keys. Missing `whys` or
-`directions`, missing Goal direction IDs, and unresolved references are rejected.
-Old goals-only files are not migrated or assigned an inferred direction. Loading
-never creates or rewrites state. Optional descriptions and Why references retain
-their model defaults; omitted Goal/Milestone statuses still default to PLANNED.
-
-Python construction makes the Goal relationship explicit:
-`Goal('g', 'Program', direction_id='d')`. `direction_id` is required and keyword-only;
-existing positional title/description/status arguments retain their meanings.
-`GoalRegistry` collections are ordered as `whys, directions, goals, milestones,
-task_links`; use keyword arguments when constructing registries. Lists normalize
-to immutable tuples. Lookup and ancestry helpers return None for unknown inputs
-or an absent optional Why.
-
-`GoalProgress` includes `direction_id` and optional `why_id` as ancestry only;
-there are no Direction/Why progress percentages or completion states. The selector
-validates these IDs against the registry and retains goal-order priority, then
-milestone order within each goal. Direction and Why order do not affect priority.
-
-The registry inspection command (`python3 -m integrations.todoist.goal_store`
-from `~/ghost`) prints only Whys, Directions, Goals, Milestones, and Task links
-counts, in that order.
-
-## Read-only progress projection
-
-```text
-Todoist current snapshot (normalized GhostTaskState)
-        +
-completion history (TaskCompletionEvent occurrences)
-        +
-GoalRegistry
-        ↓
-ProgressProjection
-```
-
-Current state answers **“what is true now?”** Completion history answers
-**“what happened?”** GoalRegistry answers **“what does this task mean?”**
-`progress.py` combines those without changing any source. Callers supply all
-three already-loaded inputs; the projection performs no filesystem, SQLite, or
-network access and generates no timestamps.
-
-From `~/ghost`, import `project_progress` or `project_milestone_progress` from
-`integrations.todoist.progress`. The latter also takes a `milestone_id` and raises
-`ProjectionError` for an unknown milestone. Both use the existing `GhostTaskState`
-and `TaskCompletionEvent` models. Duplicate current identities or unsupported
-current statuses raise `ProjectionError` rather than silently choosing a value.
-
-Frozen `MilestoneProgress` and `GoalProgress` objects expose linked, active,
-currently completed, and missing task-ID tuples, plus `completion_event_count`
-and `last_completed_at` (None without matching evidence). Task-ID tuples contain
-`SourceIdentity(source, source_id)` objects, rather than bare strings, to preserve
-provider identity even when two providers use the same local ID. Missing means
-only absent from the supplied current task state; it implies no deletion,
-completion, invalidity, or access restriction.
-
-Only current `GhostTask.status` determines active/completed classification.
-A reopened active task can have completion evidence while its currently completed
-classification remains empty. Every supplied matching event counts, including
-recurring/recompleted occurrences; the projection does not deduplicate input
-events. The latest matching completion timestamp is compared as an aware datetime.
-The event model already canonicalizes timestamps to UTC.
-
-`ProgressProjection.milestones` and `.goals` preserve registry order. Milestone
-tasks preserve task-link order; goal tasks aggregate in milestone order and then
-link order, without duplicate provider identities. Goal event counts sum milestone
-counts and the latest timestamp spans all its milestones. Empty milestones and
-goals remain in the output. Semantic status is copied directly from the registry. No percentages, automatic
-completion, scheduling, or write-back are inferred.
-
-
-## Explicit goal and milestone status
-
-| Dimension | Meaning |
-| --- | --- |
-| Current task state | What is true about tasks now |
-| Completion history | What task completions happened |
-| GoalRegistry | What tasks mean |
-| ProgressProjection | Evidence of progress |
-| Goal/Milestone status | What ARK/GHOST explicitly asserts is the current semantic state |
-
-Task evidence does not automatically transition semantic status.
-
-`goals.Status` is shared by frozen `Goal` and `Milestone` models:
-`PLANNED`, `ACTIVE`, `BLOCKED`, and `COMPLETE`. Both default to `Status.PLANNED`;
-Python constructors and replacement helpers require enum members, not strings.
-The new field follows `description`, preserving existing positional model calls.
-`TaskMilestoneLink` is unchanged.
-
-Persistence represents status as exactly `"planned"`, `"active"`, `"blocked"`, or
-`"complete"` in each goal and milestone JSON object. Loading converts these strings
-into enum members; absent status defaults to PLANNED for legacy files. Explicit
-nulls, unknown strings, and other malformed values are rejected and wrapped in
-`GoalStoreError`. Loading never rewrites a file. An explicit save includes status
-fields, retaining deterministic UTF-8 JSON and atomic replacement. Older versions
-of the strict loader cannot read the added fields. The existing `python3 -m
-goal_store` CLI still prints only counts.
-
-Pure helpers in `goals.py` return a new registry, preserve collection order and
-unaffected models/links, and never persist:
-
-```python
-from integrations.todoist.goals import Status, with_goal_status, with_milestone_status
-
-registry = with_goal_status(registry, "thesis", Status.ACTIVE)
-registry = with_milestone_status(registry, "experimental_validation", Status.COMPLETE)
-```
-
-Unknown IDs and invalid status values raise `ValueError`. Every valid status can
-replace every other status, including reopening COMPLETE as ACTIVE. Same-status
-replacement returns a new, equal registry. The original registry stays unchanged.
-
-`MilestoneProgress.status` and `GoalProgress.status` expose the corresponding
-explicit registry status without reconciliation. A COMPLETE milestone with active
-tasks is valid. All completed tasks do not complete a milestone, and all COMPLETE
-milestones do not complete their goal. Direct construction of these projection
-records now requires a `status` argument; projection function signatures are
-unchanged. No automatic transitions are implemented. Objective selection is described below.
-
-
-## Objective selection
-
-ProgressProjection answers: **“Where is there evidence of progress?”**
-Explicit status answers: **“What semantic state has ARK/GHOST asserted?”**
-Objective selection answers: **“Which active milestone should move next?”**
-
-```text
-GoalRegistry + ProgressProjection
-                ↓
-         ObjectiveSelector
-                ↓
-         ObjectiveSelection
-```
-
-Call `select_objective(registry, projection)` from
-`integrations.todoist.objective` with already-loaded models. It does not rebuild
-progress, read sources, generate timestamps, change statuses, or save anything.
-This is not yet scheduling or autonomous execution.
-
-Only ACTIVE goals and ACTIVE milestones with at least one currently active linked
-task are actionable. PLANNED, BLOCKED, and COMPLETE remain excluded even when
-active task evidence exists. Completed, missing, or historical-only tasks are
-never actionable. Completion history does not reopen semantic state.
-
-Registry order is explicit priority order: traverse `GoalRegistry.goals`, then
-for each goal traverse its milestones in `GoalRegistry.milestones` order. The
-first eligible milestone wins. This goal-first order takes precedence over global
-milestone order across different goals. Titles, completion counts, and last
-completion timestamps have no ranking effect.
-
-Frozen `Objective` contains `goal_id`, `milestone_id`, `task_ids` (a tuple of
-`SourceIdentity` values), `reason_codes`, and `summary`. All active linked tasks
-in the chosen milestone are included in task-link order. The deterministic
-summary is `Advance milestone: {milestone.title}`. Selected reason codes are
-`goal_active`, `milestone_active`, `actionable_tasks_present`, and
-`highest_registry_priority`.
-
-Frozen `ObjectiveSelection` contains `objective` (None if no work is eligible),
-`considered_milestone_ids`, and an `excluded` tuple of frozen `ObjectiveExclusion`
-records (`milestone_id`, `reason_code`). All milestones are considered in priority
-order, including those after the winner. Only ineligible milestones are excluded;
-lower-priority eligible work remains eligible. Each exclusion has one reason,
-with parent-goal ineligibility taking precedence:
-
-- `goal_not_active`: parent goal is PLANNED, BLOCKED, or COMPLETE.
-- `milestone_blocked`: milestone is BLOCKED under an ACTIVE goal.
-- `milestone_complete`: milestone is COMPLETE under an ACTIVE goal.
-- `milestone_not_active`: milestone is PLANNED under an ACTIVE goal.
-- `no_actionable_tasks`: both are ACTIVE but no active current linked task exists.
-
-Before selecting, the complete projection is checked against the registry.
-Unknown, duplicate, or missing goal/milestone projections, parent/status mismatch,
-link/order mismatch, inconsistent current classifications, and inconsistent goal
-task aggregation raise `ObjectiveSelectionError`. Current classifications must
-partition linked identities. Projection record order itself does not set priority;
-registry order does. Historical counts/timestamps are trusted and ignored by the
-selector. A stale status projection must be rebuilt by the caller, not repaired
-by the selector. The existing domain models require no changes.
-
-## Operator brief
-
-ObjectiveSelector decides what should move next. GhostBrief presents that decision
-to the operator. GhostBrief does not make strategic decisions. It renders decisions
-already made by the objective layer and exposes nearby blocked/queued work.
-
-```text
-GoalRegistry + GhostTaskState + CompletionHistory
-                      ↓
-              ProgressProjection
-                      ↓
-              ObjectiveSelection
-                      ↓
-                 GhostBrief
-                      ↓
-                  Operator
-```
-
-The operator can later be a human or execution agent. The separation remains:
-state != interpretation, interpretation != decision, decision != presentation,
-and presentation != execution. GhostBrief never alters what ObjectiveSelector
-decided.
-
-The pure API in `integrations.todoist.brief` accepts all layers explicitly:
-
-```python
-from integrations.todoist.brief import build_brief, render_brief
-
-brief = build_brief(registry, task_state, projection, selection)
-text = render_brief(brief)
-```
-
-`build_brief` performs no loading, projection rebuilding, or objective selection.
-It resolves Why/Direction/goal/milestone titles from GoalRegistry and task content from normalized
-`GhostTask.title`, never raw Todoist data. It preserves the supplied objective's
-summary and task order. Frozen models are `BriefTask`, `BriefObjective`,
-`BriefBlockedItem`, `BriefQueuedItem`, and `GhostBrief`; collections are tuples and
-task identities remain provider-aware. Blocked/queued records include `goal_title`
-so the renderer needs only the brief, with no source lookups.
-
-PRIMARY presents the supplied objective. BLOCKED includes only BLOCKED milestones
-under ACTIVE goals. QUEUED includes other ACTIVE milestones under ACTIVE goals
-with current active linked tasks. Both sections follow goal registry order, then
-milestone registry order within each goal. Planned and complete milestones, and
-all work under non-ACTIVE goals, are omitted. Completed, missing, or historical-only
-tasks never make work actionable.
-
-An absent objective stays absent, even if the caller supplies actionable work:
-it is shown as queued, never promoted by the brief. The builder checks the decision's
-identity and active task set, not its priority or diagnostic reason codes. Selection
-remains the caller-supplied decision. Message codes are emitted in this order:
-`primary_objective_selected` or `no_primary_objective`, then `blocked_work_present`
-and `queued_work_present` when applicable. `no_actionable_work` is emitted only
-when primary, blocked, and queued are all empty.
-
-Invalid correspondence raises `BriefError`: unknown/duplicate/missing projection
-identities, registry status/parent/link disagreements, inconsistent classification
-or goal aggregation, duplicate current task identities, stale current task
-classifications, unknown objective goals/milestones, wrong parent goal, inactive
-semantic status, or an objective task set that differs from its active linked
-projection set. Every selected task must resolve to one ACTIVE normalized task.
-The selector's existing validation is exposed as `validate_projection` and reused
-without running selection. No source is repaired or mutated.
-
-`render_brief` emits plain text with `GHOST BRIEF`. A selected primary adds WHY
-when its Direction references a Why, then DIRECTION, PRIMARY, and TASKS. Without
-a selected primary, neither ancestry section is shown. `BriefObjective` carries
-`direction_id`, `direction_title`, `why_id`, and `why_title` (the latter two may
-be None). Nonempty BLOCKED and QUEUED sections follow. Empty PRIMARY prints
-`None`; a completely empty brief adds `No actionable work.`. Output uses blank
-lines between sections and one final newline. IDs, reason/message codes, timestamps,
-completion counts, and diagnostic metadata are not printed. Titles, task content,
-and the supplied summary are rendered directly without generated prose.
-
-The `ghost brief` runtime adapter owns durable loading and the error boundary
-for unavailable snapshots, registries, or history. The brief itself introduces no loading or fallback policy.
-There is no scheduling, execution, notification, persistence, or provider write-back.
-
-## Running GHOST
-
-From this checkout (`~/ghost/integrations/todoist`):
-
-```sh
-./ghost brief
-```
-
-Or from `~/ghost`:
-
-```sh
-python3 -m integrations.todoist.runtime brief
-```
-
-The executable resolves imports relative to its checkout. To use `ghost brief`
-without `./`, add this checkout directory to your shell's `PATH`; no package
-installation is required.
-
-`ghost brief` is read-only. It reads the most recently published local Todoist
-snapshot, using the canonical defaults in `paths.py`:
-
-- `~/ghost/integrations/state/external/todoist/`: the published symlink containing
-  `tasks.json`, `projects.json`, `sections.json`, and `sync_metadata.json`.
-- `~/ghost/integrations/state/goals.json`: the explicitly stored goal registry.
-- `~/ghost/integrations/state/todoist-history.sqlite3`: all locally stored completion
-  events, through the existing read-only `completion_events.load_events()` API,
-  without a date filter or network ingestion.
-
-```text
-sync  -> refresh reality
-brief -> interpret current stored reality
-```
-
-The command does **not** sync Todoist, change tasks, change semantic status, or
-execute work. It does not create, repair, or migrate missing or invalid state.
-An explicitly stored empty registry follows the existing domain behavior; a
-missing registry or history database is an error, not empty evidence.
-
-Successful execution prints only the existing rendered brief and exits with 0.
-State or domain failures print `GHOST ERROR` and a concise explanation to stderr
-and exit with 1, without a traceback. `runtime.run_brief()` accepts optional
-`snapshot_path`, `registry_path`, and `history_path` arguments for isolated runs;
-its `BriefRunError.__cause__` retains the original storage/domain exception.
-The frozen `BriefRun` result exposes every pipeline stage, including the validated
-snapshot timestamp at `run.snapshot.metadata['synced_at']`. Old snapshots are
-accepted without a freshness threshold; timestamps are not added to the brief.
-
-
-## Completing PRIMARY ORDER
-
-`./ghost complete` selects the same PRIMARY ORDER as `./ghost brief`, using the
-current local snapshot, normalized tasks, registry, completion history, progress,
-objective selection, and task selection. It accepts no task title or ID. No
-primary task is an error (`GHOST ERROR`) and makes no network request.
-
-The command displays the selected task and asks:
-
-```text
-PRIMARY ORDER
-Career link
-
-Mark this task complete in Todoist? [y/N]
-```
-
-Only `y` or `yes` (case-insensitive) proceeds. Other answers, empty input, EOF,
-and an interrupted prompt print `Completion cancelled.` without writing.
-Credentials come only from the environment variable `TODOIST_API_TOKEN`; GHOST
-never sources a credential file, accepts a token argument, or persists the token.
-
-After confirmation, one authenticated `POST /api/v1/tasks/{task_id}/close` request
-is made with a 30 second timeout, no redirects, and no retries. The adapter accepts
-exactly HTTP 200 (documented) or 204 (observed from the live API) as success.
-Failures use `GHOST ERROR` without tokens or response bodies.
-On success:
-
-```text
-Completed in Todoist.
-Run `sync` to refresh GHOST state.
-```
-
-Completion writes only to Todoist. It does not alter the local snapshot,
-completion history, GoalRegistry, goals, milestones, or semantic statuses, and
-does not automatically sync. Local state does not advance until an explicit
-sync. Run the existing snapshot importer (`sync.py`) for that step:
-
-```sh
-cd ~/ghost/integrations/todoist
-# Load credentials in the shell if not already exported:
-set -a
-. ~/.config/ghost.env
-set +a
-
-./ghost brief
-# Perform PRIMARY ORDER, then confirm with y or yes:
-./ghost complete
-# Explicit sync:
-python3 ~/ghost/integrations/todoist/sync.py
-./ghost brief
-```
-
-The snapshot importer refreshes tasks, projects, and sections; it does not ingest
-completion history or infer goal/milestone completion. Until sync, a repeated
-brief or completion command still sees the stored task selection.
