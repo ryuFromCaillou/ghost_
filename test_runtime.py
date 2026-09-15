@@ -249,3 +249,84 @@ class RuntimeTests(unittest.TestCase):
                         self.assertEqual(result.stdout, self.cli()[1])
                     elif args == ['complete']:
                         self.assertIn('Completion cancelled.', result.stdout)
+
+
+class CreateCommandTests(unittest.TestCase):
+    def cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = runtime.main(['create', *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_explicit_yes_json_and_no_snapshot_or_sync(self):
+        from integrations.todoist.todoist_write import CreatedTask
+        with patch.object(runtime, 'create_task', return_value=CreatedTask('actual', 'Parent', None)) as create, \
+             patch.dict(os.environ, {'TODOIST_API_TOKEN':'fixture-token'}), \
+             patch.object(runtime, 'run_brief', side_effect=AssertionError('No snapshot access')), \
+             patch('integrations.todoist.sync.sync', side_effect=AssertionError('No sync')), \
+             patch('integrations.todoist.completion_events.append_events', side_effect=AssertionError('No history')), \
+             patch('builtins.input', side_effect=AssertionError('Already authorized')):
+            code, out, err = self.cli('Parent', '--yes')
+            self.assertEqual((code, err), (0, ''))
+            self.assertEqual(json.loads(out), {'id':'actual', 'content':'Parent', 'parent_id':None})
+            create.assert_called_once_with('fixture-token', 'Parent', parent_id=None, description=None,
+                project_id=None, section_id=None, due_string=None, due_date=None, priority=None)
+
+    def test_optional_arguments(self):
+        from integrations.todoist.todoist_write import CreatedTask
+        with patch.object(runtime, 'create_task', return_value=CreatedTask('child', 'Child', '123')) as create:
+            self.assertEqual(self.cli('Child', '--yes', '--parent', '123', '--description', 'Details',
+                '--project', 'p', '--section', 's', '--due-date', '2026-09-30', '--priority', '4')[0], 0)
+            self.assertEqual(create.call_args.kwargs, dict(parent_id='123', description='Details',
+                project_id='p', section_id='s', due_string=None, due_date='2026-09-30', priority=4))
+
+    def test_confirmation_required_and_json_stdout_only(self):
+        from integrations.todoist.todoist_write import CreatedTask
+        with patch('builtins.input', return_value='yes') as prompt, \
+             patch.object(runtime, 'create_task', return_value=CreatedTask('new', 'Child', '123')) as create:
+            code, out, err = self.cli('Child', '--parent', '123')
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)['id'], 'new')
+            self.assertIn('PARENT\n123', err)
+            self.assertIn('Create this task in Todoist? [y/N]', err)
+            prompt.assert_called_once()
+            create.assert_called_once()
+
+    def test_cancellation_no_write(self):
+        for answer in ('', 'n', 'no', 'true'):
+            with patch('builtins.input', return_value=answer), patch.object(runtime, 'create_task') as create:
+                code, out, err = self.cli('Parent')
+                self.assertEqual((code, out), (0, ''))
+                self.assertIn('Creation cancelled.', err)
+                create.assert_not_called()
+
+    def test_eof_interrupt_no_write(self):
+        for error in (EOFError, KeyboardInterrupt):
+            with patch('builtins.input', side_effect=error), patch.object(runtime, 'create_task') as create:
+                self.assertEqual(self.cli('Parent')[1], '')
+                create.assert_not_called()
+
+    def test_failure_has_no_success_json(self):
+        with patch.object(runtime, 'create_task', side_effect=runtime.TodoistWriteError('HTTP 400')):
+            self.assertEqual(self.cli('Parent', '--yes'), (1, '', 'GHOST ERROR\nHTTP 400\n'))
+
+    def test_invalid_cli_arguments(self):
+        for args in ([], ['Task','--priority','5'], ['Task','--due-date','2026-09-30','--due-string','tomorrow']):
+            with patch.object(runtime, 'create_task') as create, self.assertRaises(SystemExit):
+                self.cli(*args)
+            create.assert_not_called()
+
+    def test_missing_token_never_sends_request(self):
+        with patch.dict(os.environ, {}, clear=True), patch('integrations.todoist.todoist_write.build_opener') as network:
+            code, out, err = self.cli('Parent', '--yes')
+            self.assertEqual((code, out), (1, ''))
+            self.assertIn('TODOIST_API_TOKEN', err)
+            network.assert_not_called()
+
+    def test_executable_cancellation_without_local_state(self):
+        with tempfile.TemporaryDirectory() as home:
+            result = subprocess.run([str(Path(__file__).with_name('ghost')), 'create', 'Parent'],
+                input='n\n', capture_output=True, text=True, env=dict(os.environ, HOME=home))
+            self.assertEqual((result.returncode, result.stdout), (0, ''))
+            self.assertIn('Creation cancelled.', result.stderr)
+            self.assertEqual(list(Path(home).iterdir()), [])

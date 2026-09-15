@@ -1,6 +1,7 @@
 """Read stored task trees for a GHOST brief or explicitly complete PRIMARY ORDER."""
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import json
 import os
 import sys
 
@@ -11,7 +12,7 @@ from .strategic_context import StrategicContext, StrategicContextError, load_str
 from .normalize import NormalizationError, normalize_todoist_snapshot
 from .task_selection import TaskSelection, TaskSelectionError, select_task
 from .reader import SnapshotReadError, TodoistSnapshot, load_snapshot
-from .todoist_write import TodoistWriteError, close_task
+from .todoist_write import TodoistWriteError, close_task, create_task
 
 
 class BriefRunError(Exception):
@@ -77,8 +78,39 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('brief', help='Show the current PRIMARY ORDER')
     commands.add_parser('complete', help='Confirm and complete the current PRIMARY ORDER in Todoist')
+    create = commands.add_parser('create', help='Create one Todoist task; print its creation receipt as JSON')
+    create.add_argument('content', help='Task content')
+    create.add_argument('--parent', dest='parent_id', help='Todoist parent task ID')
+    create.add_argument('--description')
+    create.add_argument('--project', dest='project_id')
+    create.add_argument('--section', dest='section_id')
+    due = create.add_mutually_exclusive_group()
+    due.add_argument('--due-string')
+    due.add_argument('--due-date', help='YYYY-MM-DD')
+    create.add_argument('--priority', type=int, choices=range(1, 5), help='Raw Todoist API priority (1–4)')
+    create.add_argument('--yes', action='store_true', help='Explicitly authorize this creation without prompting')
     args = parser.parse_args(argv)
     try:
+        if args.command == 'create':
+            if not args.yes:
+                print(f'CREATE TASK\n{args.content}', file=sys.stderr)
+                if args.parent_id is not None:
+                    print(f'PARENT\n{args.parent_id}', file=sys.stderr)
+                print('Create this task in Todoist? [y/N] ', end='', file=sys.stderr, flush=True)
+                try:
+                    answer = input()
+                except (EOFError, KeyboardInterrupt):
+                    answer = ''
+                if answer.strip().lower() not in ('y', 'yes'):
+                    print('Creation cancelled.', file=sys.stderr)
+                    return 0
+            created = create_task(os.environ.get('TODOIST_API_TOKEN'), args.content,
+                                  parent_id=args.parent_id, description=args.description,
+                                  project_id=args.project_id, section_id=args.section_id,
+                                  due_string=args.due_string, due_date=args.due_date,
+                                  priority=args.priority)
+            print(json.dumps(asdict(created)))
+            return 0
         if args.command == 'complete':
             run_complete()
             return 0

@@ -182,6 +182,73 @@ source credential files or print tokens or remote response bodies. Failures use
 the concise `GHOST ERROR` boundary. No automatic sync, local task completion,
 parent completion, history append, or strategic-context mutation occurs.
 
+## Creating tasks and subtasks
+
+The existing writer module also exposes one primitive:
+
+```python
+from integrations.todoist.todoist_write import create_task
+
+parent = create_task(token, "Parent")
+child = create_task(token, "Child", parent_id=parent.id)
+grandchild = create_task(token, "Grandchild", parent_id=child.id)
+```
+
+Run Python package imports from `~/ghost`. `token` is the same
+`os.environ['TODOIST_API_TOKEN']` used by the existing writer; no new credential
+file or token is introduced. The CLI uses that environment variable directly.
+
+From `~/ghost/integrations/todoist`:
+
+```sh
+./ghost create "Parent"
+./ghost create "Child" --parent TASK_ID
+# Explicitly authorized automation, without an interactive prompt:
+./ghost create "Parent" --yes
+./ghost create "Child" --parent TASK_ID --yes
+```
+
+The command returns one JSON object on stdout, using actual Todoist values:
+
+```json
+{"id": "returned-provider-id", "content": "Child", "parent_id": "parent-provider-id"}
+```
+
+Prompts and errors go to stderr. Cancellation returns exit code 0 with empty
+stdout; callers must require a JSON receipt before proceeding. Failures return
+nonzero with `GHOST ERROR` and no success JSON. `--yes` explicitly authorizes one
+creation; it does not change `ghost complete` confirmation behavior.
+
+Supported fields are `content`, `parent_id`, `description`, `project_id`,
+`section_id`, `due_string`, `due_date`, and `priority`. CLI flags are `--parent`,
+`--description`, `--project`, `--section`, `--due-string`, `--due-date`, and
+`--priority`. Omitted/None fields are absent from the request. `due_date` accepts
+valid YYYY-MM-DD dates; choose it or `due_string`, not both. Priority is passed
+through as the raw API integer 1–4, without translating UI priority labels.
+
+Verified against the [current create-task API](https://developer.todoist.com/api/v1/):
+`POST /api/v1/tasks`, JSON body, exactly HTTP 200 plus a valid receipt required.
+The writer reuses the close writer's urllib request/opener convention, Bearer
+authentication, redirect refusal, 30-second timeout, and no retries. The close
+writer's status handling remains unchanged.
+
+Python returns an immutable `CreatedTask(id, content, parent_id)` receipt. A full
+`GhostTask` requires snapshot provenance and resolved project/section context, so
+creation does not invent those fields. Response IDs/content/parent IDs are
+validated and returned as supplied by Todoist, not copied from the request.
+Unrequested response fields are omitted. Use the existing sync/reader for full
+normalized state. The writer never publishes or edits the snapshot or history.
+
+There is no separate subtask abstraction or depth limit in this integration;
+Todoist enforces any service limits and validates parent/project/section IDs.
+Create a hierarchy by making sequential calls, saving every receipt, and using
+its ID for children. Stop immediately on a failed call and report the accumulated
+receipts and the task where creation stopped. Earlier tasks remain in Todoist;
+there is no rollback or automatic deletion. A timeout, malformed response, or
+unexpected status can leave the last task created remotely without a valid
+receipt. Report that outcome as unverified and inspect Todoist before retrying;
+blind retries may create duplicates.
+
 ## Validation
 
 ```sh
